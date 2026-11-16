@@ -22,9 +22,15 @@
 
 本项目非官方应用。会员及付费内容仍需相应账号权益；音频内容本身包含的广告不在界面去广告范围内。
 
+## 安装
+
+支持 Android 8.0 及以上的 arm64 设备。
+
+`v0.1.0` 起使用独立发布签名。安装过旧测试包的用户需要先卸载旧包；卸载会清除本机记录和设置。后续发布版可直接覆盖升级。
+
 ## 从源码构建
 
-需要 JDK 17 和 Android SDK。配置 `ANDROID_HOME`，或在 `local.properties` 中指定 SDK 路径，然后执行：
+需要 JDK 21 和 Android SDK 37。配置 `ANDROID_HOME`，或在 `local.properties` 中指定 SDK 路径，然后执行：
 
 ```sh
 ./gradlew :app:assembleDebug

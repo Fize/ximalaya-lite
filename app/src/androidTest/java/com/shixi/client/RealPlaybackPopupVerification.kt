@@ -35,7 +35,7 @@ class RealPlaybackPopupVerification:Instrumentation(){
     waitFor("opened player"){nodes("略过头尾").isNotEmpty()}; Thread.sleep(800)
     check(nodes("略过片头片尾").isEmpty()) { "unexpected skip sheet at mini tap $index" }
    }
-   fun screenshot(name:String){ uiAutomation.takeScreenshot().let { bitmap -> java.io.FileOutputStream("/sdcard/Download/$name.png").use { bitmap.compress(android.graphics.Bitmap.CompressFormat.PNG,100,it) };bitmap.recycle() } }
+   fun screenshot(name:String){ uiAutomation.takeScreenshot().let { bitmap -> java.io.FileOutputStream(java.io.File(targetContext.cacheDir, "$name.png")).use { bitmap.compress(android.graphics.Bitmap.CompressFormat.PNG,100,it) };bitmap.recycle() } }
    screenshot("shixi-player-review")
    val count = checkNotNull(AccountContentApi(targetContext).episodeComments(222612,1).totalCount); val label = if (count >= 10000) "${count / 10000}万+" else count.toString(); waitFor("comment count"){nodes(label).isNotEmpty()}
    click("略过头尾");waitFor("skip initial"){nodes("略过片头片尾").isNotEmpty()}

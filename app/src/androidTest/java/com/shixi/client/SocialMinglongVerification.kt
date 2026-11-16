@@ -15,7 +15,7 @@ class SocialMinglongVerification:Instrumentation(){
  override fun onStart(){
   val result=Bundle();var player:MediaController?=null;var activity:android.app.Activity?=null
   fun nodes(label:String):List<AccessibilityNodeInfo>{uiAutomation.clearCache();val list=mutableListOf<AccessibilityNodeInfo>();fun walk(n:AccessibilityNodeInfo?){if(n==null)return;if(n.text?.toString()==label||n.contentDescription?.toString()==label)list.add(n);for(i in 0 until n.childCount)walk(n.getChild(i))};walk(uiAutomation.rootInActiveWindow);return list}
-  fun waitFor(label:String,check:()->Boolean){val end=SystemClock.uptimeMillis()+25000;while(SystemClock.uptimeMillis()<end){if(check())return;Thread.sleep(100)};error(label)}
+  fun waitFor(label:String,check:()->Boolean){val end=SystemClock.uptimeMillis()+25000;while(SystemClock.uptimeMillis()<end){if(check())return;Thread.sleep(100)};uiAutomation.takeScreenshot()?.let { bitmap -> java.io.FileOutputStream(java.io.File(targetContext.cacheDir, "failure.png")).use { bitmap.compress(android.graphics.Bitmap.CompressFormat.PNG,100,it) }; bitmap.recycle() };error(label)}
   fun click(label:String){waitFor(label){nodes(label).any{node->var n:AccessibilityNodeInfo?=node;var done=false;while(n!=null&&!done){if(n.isClickable&&n.isEnabled)done=n.performAction(AccessibilityNodeInfo.ACTION_CLICK);n=n.parent};done}}}
   try{
    val f=MediaController.Builder(targetContext,SessionToken(targetContext,ComponentName(targetContext,PlaybackService::class.java))).buildAsync();player=f.get(20,TimeUnit.SECONDS)

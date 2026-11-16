@@ -128,7 +128,7 @@ class MainActivity : ComponentActivity() {
                 var sheet by remember { mutableStateOf<String?>(null) }
                 DisposableEffect(this@MainActivity) {
                     val observer = androidx.lifecycle.LifecycleEventObserver { _, event ->
-                        if (event == androidx.lifecycle.Lifecycle.Event.ON_STOP && sheet == "skip") sheet = null
+                        if (event == androidx.lifecycle.Lifecycle.Event.ON_PAUSE && sheet == "skip") sheet = null
                     }
                     lifecycle.addObserver(observer)
                     onDispose { lifecycle.removeObserver(observer) }
