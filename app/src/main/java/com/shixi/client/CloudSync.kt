@@ -1,0 +1,155 @@
+package com.shixi.client
+
+import android.content.Context
+import com.shixi.protocol.Item
+import kotlinx.coroutines.*
+import kotlinx.coroutines.channels.Channel
+import kotlinx.coroutines.flow.MutableStateFlow
+import kotlinx.coroutines.flow.asStateFlow
+
+/** Account records stay isolated; the first verified account receives the guest history batch. */
+data class CloudState(val owner: String = "", val history: List<CloudHistoryRow> = emptyList(),
+    val subscriptions: List<CloudSubscriptionRow> = emptyList(), val pending: Int = 0,
+    val busy: Boolean = false, val message: String = "登录后可同步账号历史和订阅", val problem: SyncProblem? = null)
+
+class CloudSync internal constructor(private val account: AccountManager, private val dao: CloudDao,
+    private val gateway: CloudGateway, private val scope: CoroutineScope = CoroutineScope(SupervisorJob() + Dispatchers.IO),
+    private val clock: () -> Long = System::currentTimeMillis,
+    private val guestMerge: GuestHistoryMerge? = null) {
+    private val work = Channel<suspend () -> Unit>(Channel.UNLIMITED)
+    private val mutable = MutableStateFlow(CloudState())
+    val state = mutable.asStateFlow()
+    private var retry: Job? = null
+    private var revision = clock()
+    init {
+        scope.launch { for (task in work) try { task() } catch (cancelled: CancellationException) { throw cancelled }
+            catch (error: Exception) { mutable.value = mutable.value.copy(busy = false, message = "账号记录处理失败，原记录保留，请重试", problem = SyncProblem.from("本机记录处理", error)) } }
+        scope.launch { var observed: AccountLease? = null
+            account.state.collect {
+            val lease = account.lease()
+            if (observed?.generation == lease?.generation && observed?.session === lease?.session) return@collect
+            observed = lease
+            // Hide the previous account immediately, before queued I/O or network completes.
+            if (mutable.value.owner != lease?.owner.orEmpty()) mutable.value = CloudState(owner = lease?.owner.orEmpty())
+            retry?.cancel()
+            if (lease != null) submit { if (account.current(lease)) { refresh(lease); synchronize(lease, false) } }
+        } }
+    }
+    private fun submit(task: suspend () -> Unit) { check(work.trySend(task).isSuccess) }
+    private fun nextRevision(): Long { revision = maxOf(revision + 1, clock()); return revision }
+    private suspend fun refresh(lease: AccountLease, message: String? = null, problem: SyncProblem? = null) {
+        val histories = dao.history(lease.owner); val subs = dao.subscriptions(lease.owner); val pending = dao.pending(lease.owner)
+        if (account.current(lease)) mutable.value = CloudState(lease.owner, histories, subs, pending.size, false,
+            message ?: if (pending.isEmpty()) "账号记录已读取，尚未核对服务器" else "${pending.size}项待同步；离线修改尚未由服务器确认", problem)
+    }
+    fun sync() { val lease = account.lease() ?: return; submit { synchronize(lease, true) } }
+    fun toggle(item: Item, expectedOwner: String? = null) {
+        require(item.id > 0)
+        val lease = account.lease() ?: return
+        if (expectedOwner != null && lease.owner != expectedOwner) return
+        submit { if (account.current(lease)) {
+            val current = dao.subscriptions(lease.owner).firstOrNull { it.id == item.id }
+            dao.subscribe(CloudSubscriptionRow(lease.owner, item.id, item.title, item.cover, current?.subscribed != true), nextRevision())
+            refresh(lease); synchronize(lease, false)
+        } }
+    }
+    fun record(lease: AccountLease?, row: HistoryRow) {
+        val playback = lease?.let(account::renewPlayback) ?: return
+        submit { account.renewPlayback(playback)?.let { lease ->
+            val previous = dao.history(lease.owner).firstOrNull { it.id == row.id }
+            // Timeline/list changes while paused must not create a new cloud listening event.
+            if (previous != null && previous.albumId == row.albumId &&
+                previous.positionMs / 1000 == row.positionMs / 1000) return@let
+            dao.record(CloudHistoryRow(lease.owner, row.id, row.albumId, row.title, row.cover,
+                row.positionMs, row.durationMs, row.completed, row.updatedAt), nextRevision())
+            refresh(lease)
+            val pending = dao.pending(lease.owner).first { it.kind == "history" && it.id == row.id }
+            if (pending.attempts < 5 && pending.nextAt != Long.MAX_VALUE) schedule(lease, maxOf(5_000, pending.nextAt - clock()))
+        } }
+    }
+    private fun schedule(lease: AccountLease, delayMs: Long) {
+        retry?.cancel(); retry = scope.launch { delay(delayMs.coerceAtLeast(1_000)); submit { synchronize(lease, false) } }
+    }
+    private fun confirmed(op: SyncRow, remote: CloudSnapshot, history: CloudHistoryRow?, sub: CloudSubscriptionRow?): Boolean =
+        if (op.kind == "subscription") remote.subscriptions.any { it.id == op.id } == sub?.subscribed
+        else history != null && remote.history.any { it.albumId == history.albumId && it.serverAt >= history.localAt }
+
+    private suspend fun synchronize(lease: AccountLease, manual: Boolean) {
+        if (!account.current(lease)) return
+        retry?.cancel(); mutable.value = mutable.value.copy(busy = true, message = "正在核对服务器…")
+        var stage = "本机记录合并"
+        try {
+            guestMerge?.stage(lease, dao, account::current, ::nextRevision)
+            if (!account.current(lease)) return
+            // Query before every resend: a previous timeout may have happened after acceptance.
+            stage = "账号记录读取"
+            var remote = gateway.read(lease)
+            if (!account.current(lease)) return
+            dao.reconcile(lease.owner, remote)
+            val histories = dao.history(lease.owner).associateBy { it.id }
+            val subscriptions = dao.subscriptions(lease.owner).associateBy { it.id }
+            val pending = dao.pending(lease.owner)
+            // The cloud endpoint stores one listening cursor per album, not one per episode.
+            // Keep every episode locally, but send only the newest pending event per album.
+            val latest = pending.filter { it.kind == "history" && histories[it.id] != null }
+                .groupBy { histories.getValue(it.id).albumId }
+                .mapValues { (_, ops) -> ops.maxWith(compareBy<SyncRow> { histories.getValue(it.id).localAt }.thenBy { it.revision }) }
+            val sent = mutableListOf<SyncRow>()
+            for (op in pending) {
+                if (!account.current(lease)) return
+                val history = histories[op.id]; val sub = subscriptions[op.id]
+                if (confirmed(op, remote, history, sub)) { dao.acknowledge(op.owner, op.kind, op.id, op.revision); continue }
+                if (op.kind == "history" && history != null && latest[history.albumId]?.id != op.id) continue
+                if (!manual && (op.attempts >= 5 || op.nextAt > clock())) continue
+                stage = if (op.kind == "history") "进度上传" else "订阅更新"
+                if (op.kind == "history" && history != null) gateway.progress(lease, history)
+                else if (op.kind == "subscription" && sub != null) gateway.subscription(lease, sub)
+                else continue
+                sent.add(op)
+            }
+            if (sent.isNotEmpty()) {
+                if (!account.current(lease)) return
+                stage = "同步结果确认"
+                remote = gateway.read(lease)
+                if (!account.current(lease)) return
+                val sentAlbums = sent.filter { it.kind == "history" }.mapNotNull { histories[it.id]?.albumId }.toSet()
+                for (op in pending) {
+                    if (confirmed(op, remote, histories[op.id], subscriptions[op.id])) dao.acknowledge(op.owner, op.kind, op.id, op.revision)
+                    else if (op in sent || op.kind == "history" && histories[op.id]?.albumId in sentAlbums)
+                        dao.defer(op.owner, op.kind, op.id, op.revision, op.attempts + 1, clock() + backoff(op.attempts + 1))
+                }
+                dao.reconcile(lease.owner, remote)
+            }
+            if (!account.current(lease)) return
+            dao.reconcile(lease.owner, remote)
+            val remaining = dao.pending(lease.owner)
+            refresh(lease, if (remaining.isEmpty()) "服务器核对完成" else "${remaining.size}项尚未由服务器确认，可稍后重试")
+            remaining.filter { it.attempts < 5 }.minOfOrNull { (it.nextAt - clock()).coerceAtLeast(30_000) }?.let { schedule(lease, it) }
+        } catch (cancelled: CancellationException) { throw cancelled }
+        catch (error: Exception) {
+            if (!account.current(lease)) return
+            if (error is CloudFailure && error.expired) { account.invalidate(lease); mutable.value = CloudState(message = "登录已失效，请重新登录；待同步记录仍属于原账号") }
+            else {
+                val pending = dao.pending(lease.owner)
+                val retryable = error !is CloudFailure || error.retryable
+                for (op in pending) dao.defer(op.owner, op.kind, op.id, op.revision, op.attempts + 1, (if (!retryable) Long.MAX_VALUE else clock() + backoff(op.attempts + 1)))
+                refresh(lease, if (error is CloudFailure) error.message else "网络不可用或同步失败，原账号待同步记录已保留", SyncProblem.from(stage, error))
+                // Business rejections require user action; do not repeatedly replay risk checks.
+                if (retryable) pending.filter { it.attempts + 1 < 5 }.minOfOrNull { backoff(it.attempts + 1) }?.let { schedule(lease, it) }
+            }
+        } finally { if (account.current(lease)) mutable.value = mutable.value.copy(busy = false) }
+    }
+    suspend fun awaitIdle() { val done = CompletableDeferred<Unit>(); submit { done.complete(Unit) }; done.await() }
+    fun close() { scope.cancel() }
+    companion object {
+        private fun backoff(attempt: Int): Long = (30_000L shl attempt.coerceIn(0, 6)).coerceAtMost(1_800_000)
+        @Volatile private var instance: CloudSync? = null
+        fun get(context: Context): CloudSync = instance ?: synchronized(this) {
+            instance ?: context.applicationContext.let { app ->
+                val database = ListeningDatabase.open(app)
+                CloudSync(AccountManager.get(app), database.cloud(), CloudApi(app),
+                    guestMerge = GuestHistoryMerge(java.io.File(app.noBackupFilesDir, "first-account-history-v1"), database.records()))
+            }.also { instance = it }
+        }
+    }
+}

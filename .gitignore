@@ -1,0 +1,26 @@
+# Local build state and generated packages
+.gradle/
+.kotlin/
+**/build/
+local.properties
+*.apk
+*.aab
+*.idsig
+
+# Signing keys and local secrets
+*.jks
+*.keystore
+keystore.properties
+signing.properties
+.env
+.env.*
+!.env.example
+
+# Editor and system files
+.idea/
+*.iml
+.DS_Store
+
+# Historical reverse-engineering material and generated evidence
+/analysis/
+/implementation/
