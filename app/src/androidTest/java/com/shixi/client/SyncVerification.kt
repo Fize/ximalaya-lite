@@ -40,8 +40,9 @@ class SyncVerification : Instrumentation() {
         var failWith: Exception? = null
         var fail = false; var failAfterSubscription = false; var rejected = false; var writes = 0
         var entered: CountDownLatch? = null; var release: CountDownLatch? = null
+        var readWaitSeconds = 5L
         override fun read(lease: AccountLease): CloudSnapshot {
-            entered?.countDown(); release?.await(5, TimeUnit.SECONDS)
+            entered?.countDown(); release?.await(readWaitSeconds, TimeUnit.SECONDS)
             failWith?.let { throw it }
             if (rejected) throw CloudFailure(true, "expired fixture")
             if (fail) throw java.io.IOException("offline fixture")
@@ -148,6 +149,8 @@ class SyncVerification : Instrumentation() {
         val file = File(targetContext.noBackupFilesDir,"sync-natural-service.db"); file.delete()
         val database = ListeningDatabase.open(targetContext,"sync-natural-service.db")
         var player: androidx.media3.session.MediaController? = null
+        var activity: android.app.Activity? = null
+        var blockedReadRelease: CountDownLatch? = null
         fun <T> main(block: () -> T): T {
             var value: T? = null; var error: Throwable? = null
             runOnMainSync { try { value = block() } catch (failure: Throwable) { error = failure } }
@@ -207,6 +210,58 @@ class SyncVerification : Instrumentation() {
                 runBlocking { check(database.cloud().pending(original.owner).any { it.id==222612L }) }
                 result.putString("refreshHeartbeat", "PASS two verified refreshes, old network lease rejected and stream stopped, resumed real heartbeat persisted")
             }
+            if (phase == "service_natural") {
+                waitFor("initial cloud snapshot before blocked request") { sync.state.value.history.any { it.id == 222612L } }
+                val stale = sync.state.value.history.first { it.id == 222612L }
+                remote.histories["account:9501"] = mutableListOf(stale.copy(localAt = 0, serverAt = stale.localAt))
+                val entered = CountDownLatch(1); val release = CountDownLatch(1)
+                blockedReadRelease = release
+                remote.fail = false; remote.entered = entered; remote.release = release; remote.readWaitSeconds = 45
+                sync.sync(); check(entered.await(5, TimeUnit.SECONDS)) { "blocked read not entered" }
+                waitFor("real audio advances beyond stale cloud snapshot") { main { controller.isPlaying && controller.currentPosition > stale.positionMs + 5000 } }
+                main { controller.pause() }
+                waitFor("pause applied before opening home") { main { !controller.playWhenReady && !controller.isPlaying } }
+                val pausedAt = main { controller.currentPosition }
+                check(sync.state.value.history.first { it.id == 222612L }.positionMs < pausedAt - 3000) { "cloud state did not remain stale" }
+                activity = startActivitySync(Intent(targetContext, MainActivity::class.java).addFlags(Intent.FLAG_ACTIVITY_NEW_TASK or Intent.FLAG_ACTIVITY_CLEAR_TASK))
+                fun nodes(text: String): List<AccessibilityNodeInfo> {
+                    if (android.os.Build.VERSION.SDK_INT >= 33) uiAutomation.clearCache()
+                    val found = mutableListOf<AccessibilityNodeInfo>()
+                    fun walk(node: AccessibilityNodeInfo?) {
+                        if (node == null) return
+                        if (node.text?.toString() == text || node.contentDescription?.toString() == text) found.add(node)
+                        repeat(node.childCount) { walk(node.getChild(it)) }
+                    }
+                    walk(uiAutomation.rootInActiveWindow); return found
+                }
+                fun click(text: String): Boolean {
+                    for (node in nodes(text)) {
+                        var candidate: AccessibilityNodeInfo? = node
+                        while (candidate != null) {
+                            if (candidate.isClickable && candidate.isEnabled && candidate.performAction(AccessibilityNodeInfo.ACTION_CLICK)) return true
+                            candidate = candidate.parent
+                        }
+                    }
+                    return false
+                }
+                waitFor("home rendered for latest-progress resume") {
+                    click("Don't Show Again"); click("Don't show again"); click("OK"); click("确定")
+                    if (nodes("继续收听").isEmpty()) click("收听")
+                    nodes("继续收听").isNotEmpty()
+                }
+                var continueClicked = false
+                waitFor("home continue playback") { if (continueClicked || main { controller.playWhenReady }) true else click("继续播放").also { continueClicked = it } }
+                waitFor("home resumes from latest paused position") { main { controller.isPlaying && controller.currentPosition >= pausedAt } }
+                val resumedAt = main { controller.currentPosition }
+                check(resumedAt >= pausedAt && resumedAt - pausedAt < 5000) { "home moved position: paused=$pausedAt resumed=$resumedAt" }
+                remote.entered = null; remote.release = null; release.countDown(); blockedReadRelease = null
+                runBlocking { sync.awaitIdle() }
+                check(main { controller.currentMediaItem?.mediaId == "222612:3544:1" && controller.currentPosition >= pausedAt }) { "old cloud response rewound player" }
+                result.putString("staleCloudHomeResume", "PASS real audio paused=$pausedAt resumed=$resumedAt, blocked cloud read and old response never rewind player")
+                main { activity?.finish() }; activity = null
+                // Restore the controlled offline setup for natural-transition assertions.
+                remote.fail = true; remote.histories.clear(); remote.writes = 0
+            }
             main { controller.seekTo(firstDuration - 4000) }
             waitFor("natural next episode playing") { main { controller.currentMediaItem?.mediaId == "222617:3544:1" && controller.isPlaying && controller.currentPosition > 1800 } }
             main { controller.pause() }
@@ -234,11 +289,11 @@ class SyncVerification : Instrumentation() {
             runBlocking {
                 check(database.cloud().pending("account:9501").isEmpty()) { "playback outbox not acknowledged after recovery" }
                 val uploaded = remote.read(manager.lease()!!).history
-                check(uploaded.any { it.id == 222612L && it.completed && it.positionMs == observedEnd.first })
+                check(database.cloud().history("account:9501").any { it.id == 222612L && it.completed && it.positionMs == observedEnd.first })
                 check(uploaded.any { it.id == 222617L && !it.completed && it.positionMs in 1500..10000 })
-                check(remote.writes == 2) { "unexpected playback upload count" }
+                check(remote.writes == 1) { "expected latest album cursor only, writes=${remote.writes}" }
             }
-            result.putString("uploadRecovery", "PASS two real-playback records retained on failure, uploaded and confirmed by synthetic remote readback")
+            result.putString("uploadRecovery", "PASS both local episode records retained; latest album cursor uploaded once and confirmed by synthetic remote readback")
             if (phase == "service_refresh") {
                 main { controller.play() }
                 waitFor("second episode playing again") { main { controller.isPlaying } }
@@ -259,8 +314,25 @@ class SyncVerification : Instrumentation() {
             result.putInt("renderedAudioBuffers",rendered)
             result.putString("result","PASS actual service real audio natural tail transition: old completed/end outbox and distinct next breakpoint; owner isolated")
             finish(-1,result)
-        } catch (failure: Throwable) { result.putString("failure",failure.javaClass.simpleName+": "+failure.message?.take(300)); finish(0,result) }
-        finally { player?.let { main { it.pause(); it.release() } }; accountField.set(null,previousAccount); syncField.set(null,previousSync); scope.cancel(); database.close() }
+        } catch (failure: Throwable) {
+            runCatching {
+                if (android.os.Build.VERSION.SDK_INT >= 33) uiAutomation.clearCache()
+                val lines = mutableListOf<String>()
+                fun visit(node: AccessibilityNodeInfo?, depth: Int = 0) {
+                    if (node == null || depth > 30) return
+                    lines.add("${node.className}: text=${node.text?.toString().orEmpty()} desc=${node.contentDescription?.toString().orEmpty()} clickable=${node.isClickable} enabled=${node.isEnabled}")
+                    repeat(node.childCount) { visit(node.getChild(it), depth + 1) }
+                }
+                visit(uiAutomation.rootInActiveWindow)
+                val dump = lines.joinToString("\n")
+                result.putString("visible", dump.take(12000))
+                File(targetContext.cacheDir, "sync-natural-failure.txt").writeText(dump)
+                uiAutomation.takeScreenshot()?.let { bitmap -> File(targetContext.cacheDir, "sync-natural-failure.png").outputStream().use { bitmap.compress(android.graphics.Bitmap.CompressFormat.PNG, 100, it) } }
+                result.putString("playbackDiagnostic", main { player?.let { "playing=${it.isPlaying},ready=${it.playWhenReady},position=${it.currentPosition},track=${it.currentMediaItem?.mediaId},event=${it.sessionExtras.getLong("listeningAt")},eventTrack=${it.sessionExtras.getLong("listeningTrack")},storage=${it.sessionExtras.getBoolean("storageReady")}" } })
+            }
+            result.putString("failure",failure.javaClass.simpleName+": "+failure.message?.take(300)); finish(0,result)
+        }
+        finally { blockedReadRelease?.countDown(); main { activity?.finish() }; player?.let { main { it.pause(); it.release() } }; accountField.set(null,previousAccount); syncField.set(null,previousSync); scope.cancel(); database.close() }
     }
 
     private fun verifyAlbumProgress() {
@@ -293,7 +365,7 @@ class SyncVerification : Instrumentation() {
             check(dao.pending(lease.owner).isEmpty());check(dao.history(lease.owner).size==4)
             check(syncViewState(sync.state.value)==SyncViewState.SYNCED)
             // Paused list/timeline events don't recreate already-confirmed tasks.
-            sync.record(lease,HistoryRow(owner=lease.owner,id=803,albumId=8,page=1,title="episode3",cover="",positionMs=10999,durationMs=100000,completed=false,updatedAt=9000));sync.awaitIdle()
+            sync.record(lease,HistoryRow(owner=lease.owner,id=803,albumId=8,page=1,title="episode3",cover="",positionMs=10000,durationMs=100000,completed=false,updatedAt=1003));sync.awaitIdle()
             check(dao.pending(lease.owner).isEmpty())
             // Upload success alone is insufficient: stale readback retains all pending rows.
             repeat(2) {i->dao.record(CloudHistoryRow(lease.owner,810L+i,8,"new$i","",20000,100000,false,2000L+i),10L+i)}
@@ -314,7 +386,7 @@ class SyncVerification : Instrumentation() {
     }
 
     private fun verifyHttpRetryRecovery() {
-        for ((index, mode) in listOf("initial_read", "write_accepted", "final_confirmation").withIndex()) {
+        for ((index, mode) in listOf("initial_read", "write_accepted", "final_confirmation", "unrelated_history_read").withIndex()) {
             val owner="account:${9701+index}"
             val scope=CoroutineScope(SupervisorJob()+Dispatchers.IO)
             val source=Login().apply { uid=9701L+index }
@@ -332,13 +404,16 @@ class SyncVerification : Instrumentation() {
                 val req=chain.request(); val path=req.url.encodedPath
                 requests.add(req.method+" "+path)
                 val isWrite=req.method=="POST"
+                val isSubscriptionRead=path.contains("subscribe/list")
                 var status=200
-                if (failReopenRead && !isWrite) { status=503; failReopenRead=false }
-                else if (firstFailure && mode=="initial_read") { status=503; firstFailure=false }
+                // A subscription retry is independent of history download failures.
+                if (failReopenRead && isSubscriptionRead) { status=503; failReopenRead=false }
+                else if (firstFailure && mode=="unrelated_history_read" && path.contains("history/query")) { status=503; firstFailure=false }
+                else if (firstFailure && mode=="initial_read" && isSubscriptionRead) { status=503; firstFailure=false }
                 else if (isWrite) {
                     writes.incrementAndGet(); accepted=true
                     if (firstFailure && mode=="write_accepted") { status=503; firstFailure=false }
-                } else if (firstFailure && mode=="final_confirmation" && accepted) { status=503; firstFailure=false }
+                } else if (firstFailure && mode=="final_confirmation" && accepted && isSubscriptionRead) { status=503; firstFailure=false }
                 val body=if(path.contains("history/query")) "{\"ret\":0,\"data\":{\"listenModels\":[]}}"
                     else if(path.contains("subscribe/list")) JSONObject().put("ret",0).put("data",JSONObject().put("subscribeAlbumResult",JSONObject().put("list",org.json.JSONArray().apply { if(accepted) put(JSONObject().put("albumId",99701).put("title","retry")) }))).toString()
                     else "{\"ret\":0}"
@@ -351,6 +426,13 @@ class SyncVerification : Instrumentation() {
             try {
                 runBlocking { database.cloud().subscribe(CloudSubscriptionRow(owner,99701,"retry","",true),42) }
                 var sync=openSync()
+                if (mode=="unrelated_history_read") {
+                    waitFor("history failure must not block subscription") { !sync.state.value.busy && sync.state.value.message=="服务器核对完成" && sync.state.value.pending==0 }
+                    check(writes.get()==1)
+                    runBlocking { check(database.cloud().subscriptions(owner).single().subscribed) }
+                    sendStatus(0,Bundle().apply { putString("passed","history503_does_not_block_subscription_upload_or_confirmation") })
+                    continue
+                }
                 waitFor("$mode initial 503 deferred") { !sync.state.value.busy && sync.state.value.pending==1 && runBlocking { database.cloud().pending(owner).single().attempts==1 } }
                 val first=pending()
                 check(first.nextAt in (now.get()+1)..(now.get()+1_800_000)) { "$mode nonfinite backoff" }

@@ -140,7 +140,15 @@ class MainActivity : ComponentActivity() {
                 val accountState by accountManager.state.collectAsState()
                 val cloudSync = remember { CloudSync.get(this@MainActivity) }
                 val cloudState by cloudSync.state.collectAsState()
-                val cloudVisible = accountState.signedIn && cloudState.owner == "account:${accountState.uid}"
+                val cloudVisible by rememberUpdatedState(accountState.signedIn && cloudState.owner == "account:${accountState.uid}")
+                val effectiveLocal by rememberUpdatedState(if (accountState.signedIn) local.copy(history = if (cloudVisible) (cloudState.history.map { it.history() } + local.accountHistory.filter { it.owner == cloudState.owner }).groupBy { it.id }.values.map { rows -> rows.maxBy { it.updatedAt } }.sortedByDescending { it.updatedAt } else emptyList()) else local)
+                DisposableEffect(cloudSync) {
+                    val observer = androidx.lifecycle.LifecycleEventObserver { _, event ->
+                        if (event == androidx.lifecycle.Lifecycle.Event.ON_START) cloudSync.resume()
+                    }
+                    lifecycle.addObserver(observer)
+                    onDispose { lifecycle.removeObserver(observer) }
+                }
                 val followed = local.follows
                 var cacheMessage by remember { mutableStateOf("") }
                 var clearingCache by remember { mutableStateOf(false) }
@@ -274,12 +282,16 @@ class MainActivity : ComponentActivity() {
                     val existing = (0 until player.mediaItemCount).firstOrNull {
                         PlaybackItems.item(player.getMediaItemAt(it))?.let { it.id == entry.id && it.albumId == entry.albumId && it.page == entry.page } == true
                     }
-                    val saved = requestedHistory ?: local.history.firstOrNull { it.id == entry.id }
+                    val merged = effectiveLocal.history.firstOrNull { it.id == entry.id }
+                    val saved = if (merged != null && merged.updatedAt >= (requestedHistory?.updatedAt ?: 0)) merged else requestedHistory
+                    val event = player.sessionExtras
+                    val ownEvent = event.getString("listeningOwner") == (accountManager.lease()?.owner ?: LOCAL_OWNER) && event.getLong("listeningTrack") == entry.id
+                    val latestPlayer = existing == player.currentMediaItemIndex && (player.playWhenReady || ownEvent && event.getLong("listeningAt") > (saved?.updatedAt ?: 0))
                     val current = player.currentMediaItem?.let(PlaybackItems::item)
                     val sameTrack = current?.id == entry.id && current.albumId == entry.albumId
                     val adjusted = if (requestedHistory == null && sameTrack) pendingSeek?.takeIf { it.first == entry.id && it.second == entry.albumId }?.third
                         ?: if (player.sessionExtras.getLong("manualSeekTrack") == entry.id && player.sessionExtras.getLong("manualSeekAlbum") == entry.albumId && player.sessionExtras.getLong("manualSeekAt") >= (saved?.updatedAt ?: 0)) player.currentPosition else null else null
-                    val resume = adjusted ?: if (saved?.completed == true) 0L else if (requestedHistory != null) requestedHistory.resumeMs else if (existing == player.currentMediaItemIndex) player.currentPosition else saved?.resumeMs ?: 0
+                    val resume = adjusted ?: if (latestPlayer) player.currentPosition else if (saved?.completed == true) 0L else if (requestedHistory != null) saved?.resumeMs ?: 0 else if (existing == player.currentMediaItemIndex && player.playWhenReady) player.currentPosition else saved?.resumeMs ?: 0
                     if (existing != null && player.playbackState != Player.STATE_IDLE) player.seekTo(existing, resume)
                     else player.setMediaItems(listOf(PlaybackItems.mediaItem(entry)), 0, resume)
                     player.prepare(); player.play()
@@ -365,7 +377,15 @@ class MainActivity : ComponentActivity() {
                         } finally { if (intent == playbackIntentGeneration) pendingTrackId = null }
                     }
                 }
-                fun refreshLibrary() { if (cloudVisible) cloudSync.sync() else scope.launch { snackbars.showSnackbar("已更新") } }
+                fun refreshLibrary() {
+                    if (cloudVisible) {
+                        cloudSync.sync()
+                        scope.launch {
+                            cloudSync.awaitIdle()
+                            if (syncViewState(cloudSync.state.value) == SyncViewState.ERROR) snackbars.showSnackbar("同步失败，请稍后重试")
+                        }
+                    } else scope.launch { snackbars.showSnackbar("已更新") }
+                }
                 fun retryPlayback() {
                     val player = controller
                     if (player == null || player.currentMediaItem == null) { message = "请先选择节目"; return }
@@ -429,7 +449,6 @@ class MainActivity : ComponentActivity() {
                     }
                 }
                 CompositionLocalProvider(LocalFeedbackHost provides snackbars) {
-                if (cloudVisible && syncViewState(cloudState) == SyncViewState.ERROR) FloatingNotice("同步失败，请稍后重试", "重试", ::refreshLibrary)
                 if (syncViewState(cloudState) == SyncViewState.EXPIRED) FloatingNotice("登录已失效，请重新登录", "登录", ::openAccount)
                 if (playbackIssue.isNotBlank()) FloatingNotice(playbackIssue, onAction = ::retryPlayback)
                 Row(Modifier.fillMaxSize()) {
@@ -576,11 +595,23 @@ class MainActivity : ComponentActivity() {
 
                         } else {
                             when (tab) {
-                                0 -> HomeScreen(local, currentTrack, position, duration, playbackState, ::openPlayer,
-                                    { selectTrack(it.item()) }, { openAlbum(it) }, { libraryFilter = "订阅"; switchTab(2) }, { switchTab(1) }, ::openSettings, ::openSearch, controller?.playWhenReady == true, pendingTrackId, ::togglePlayback,
+                                0 -> {
+                                    val recent = effectiveLocal.history.firstOrNull()
+                                    val event = controller?.sessionExtras
+                                    val latestPlayer = event?.getString("listeningOwner") == (accountManager.lease()?.owner ?: LOCAL_OWNER) && event?.getLong("listeningTrack") == currentTrack?.id && (event?.getLong("listeningAt") ?: 0) >= (recent?.updatedAt ?: 0)
+                                    val adjustedCursor = event?.getLong("manualSeekTrack") == currentTrack?.id && event?.getLong("manualSeekAlbum") == currentTrack?.albumId && (event?.getLong("manualSeekAt") ?: 0) >= (recent?.updatedAt ?: 0)
+                                    val live = controller?.playWhenReady == true || recent == null || latestPlayer || adjustedCursor
+                                    HomeScreen(effectiveLocal, if (live) currentTrack else recent?.item(), if (live) position else recent!!.positionMs.toFloat(), if (live) duration else recent!!.durationMs.toFloat(), playbackState, {
+                                        if (!live && recent != null && storageReady && (currentTrack?.id != recent.id || currentTrack?.albumId != recent.albumId || controller?.currentPosition != recent.resumeMs)) {
+                                            controller?.setMediaItems(listOf(PlaybackItems.mediaItem(recent.item())), 0, recent.resumeMs)
+                                        }
+                                        openPlayer()
+                                    },
+                                    { selectTrack(it.item()) }, { openAlbum(it) }, { libraryFilter = "订阅"; switchTab(2) }, { switchTab(1) }, ::openSettings, ::openSearch, controller?.playWhenReady == true, pendingTrackId, { if (live) togglePlayback() else recent?.let { playTrack(it.item()) } },
                                     if (cloudVisible) cloudState.subscriptions.filter { it.subscribed }.map { it.item() } else emptyList(), cloudVisible && cloudState.busy, { refreshLibrary() }, { moreTrack = it.item(); sheet = "more" }, { libraryFilter = "历史"; switchTab(2) })
+                                }
                                 1 -> DiscoveryScreen(discovery, ::openSearch) { openAlbum(it) }
-                                2 -> LibraryScreen(local, cloudState, cloudVisible, ::openSettings, ::openAccount, { sheet = "queue" }, { refreshLibrary() }, { openAlbum(it) },
+                                2 -> LibraryScreen(effectiveLocal, cloudState, cloudVisible, ::openSettings, ::openAccount, { sheet = "queue" }, { refreshLibrary() }, { openAlbum(it) },
                                     { cloudSync.toggle(it.item(), it.owner) }, { selectTrack(it.item()) },
                                     { playCloudHistory(it) }, pendingTrackId, currentTrack?.id, controller?.playWhenReady == true, { switchTab(1) }, libraryFilter, { libraryFilter = it }, ::togglePlayback, onScan = { startActivity(android.content.Intent(this@MainActivity, WebLoginActivity::class.java)) })
 

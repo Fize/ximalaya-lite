@@ -12,10 +12,13 @@ import java.io.IOException
 import java.util.UUID
 import java.util.concurrent.TimeUnit
 
-data class CloudSnapshot(val history: List<CloudHistoryRow>, val subscriptions: List<CloudSubscriptionRow>)
+data class CloudSnapshot(val history: List<CloudHistoryRow>, val subscriptions: List<CloudSubscriptionRow>,
+    val historyFailure: Exception? = null, val subscriptionFailure: Exception? = null)
 class CloudFailure(val expired: Boolean = false, message: String, val retryable: Boolean = false) : IOException(message)
 interface CloudGateway {
     fun read(lease: AccountLease): CloudSnapshot
+    suspend fun readIndependent(lease: AccountLease, historyReady: suspend (List<CloudHistoryRow>) -> Unit): CloudSnapshot =
+        read(lease).also { if (it.historyFailure == null) historyReady(it.history) }
     fun subscription(lease: AccountLease, row: CloudSubscriptionRow)
     fun progress(lease: AccountLease, row: CloudHistoryRow)
 }
@@ -59,9 +62,20 @@ class CloudApi internal constructor(private val context: Context, private val ht
             return data
         }
     }
-    override fun read(lease: AccountLease): CloudSnapshot {
-        val owner = lease.owner; val history = mutableListOf<CloudHistoryRow>(); val subscriptions = mutableListOf<CloudSubscriptionRow>()
-        var stage = "历史读取"
+    override fun read(lease: AccountLease) = CloudSnapshot(readHistory(lease), readSubscriptions(lease))
+    override suspend fun readIndependent(lease: AccountLease, historyReady: suspend (List<CloudHistoryRow>) -> Unit): CloudSnapshot {
+        var historyFailure: Exception? = null
+        var subscriptionFailure: Exception? = null
+        val history = try { readHistory(lease).also { historyReady(it) } }
+            catch (cancelled: kotlinx.coroutines.CancellationException) { throw cancelled }
+            catch (error: Exception) { if (error is CloudFailure && error.expired) throw error; historyFailure = error; emptyList() }
+        val subscriptions = try { readSubscriptions(lease) }
+            catch (cancelled: kotlinx.coroutines.CancellationException) { throw cancelled }
+            catch (error: Exception) { if (error is CloudFailure && error.expired) throw error; subscriptionFailure = error; emptyList() }
+        return CloudSnapshot(history, subscriptions, historyFailure, subscriptionFailure)
+    }
+    private fun readHistory(lease: AccountLease): List<CloudHistoryRow> {
+        val owner = lease.owner; val history = mutableListOf<CloudHistoryRow>()
         try {
         var page = 1
         while (true) {
@@ -87,8 +101,15 @@ class CloudApi internal constructor(private val context: Context, private val ht
             if (list.length() < 20) break
             if (++page > 100) throw CloudFailure(message = "历史超过本次同步范围，未覆盖本机数据，请稍后重试")
         }
-        stage = "订阅读取"
-        page = 1
+        return history.groupBy { it.id }.values.map { rows -> rows.maxBy { it.serverAt } }
+        } catch (error: kotlinx.coroutines.CancellationException) { throw error }
+        catch (error: CloudFailure) { throw error }
+        catch (error: Exception) { throw CloudReadFailure("历史读取", error) }
+    }
+    private fun readSubscriptions(lease: AccountLease): List<CloudSubscriptionRow> {
+        val owner = lease.owner; val subscriptions = mutableListOf<CloudSubscriptionRow>()
+        try {
+        var page = 1
         while (true) {
             val result = request(lease, "subscribe/v3/subscribe/list", mapOf("pageId" to page.toString(), "pageSize" to "20", "device" to "android"))
             val value = result.getJSONObject("data").get("subscribeAlbumResult")
@@ -102,10 +123,10 @@ class CloudApi internal constructor(private val context: Context, private val ht
             if (list.length() < 20) break
             if (++page > 100) throw CloudFailure(message = "订阅超过本次同步范围，未覆盖本机数据，请稍后重试")
         }
-        return CloudSnapshot(history.distinctBy { it.id }, subscriptions.distinctBy { it.id })
+        return subscriptions.distinctBy { it.id }
         } catch (error: kotlinx.coroutines.CancellationException) { throw error }
         catch (error: CloudFailure) { throw error }
-        catch (error: Exception) { throw CloudReadFailure(stage, error) }
+        catch (error: Exception) { throw CloudReadFailure("订阅读取", error) }
     }
     override fun subscription(lease: AccountLease, row: CloudSubscriptionRow) {
         require(row.owner == lease.owner && row.id > 0)

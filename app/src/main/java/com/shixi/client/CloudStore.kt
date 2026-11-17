@@ -19,7 +19,7 @@ data class SyncRow(val owner: String, val kind: String, val id: Long, val revisi
 
 @Dao
 abstract class CloudDao {
-    @Query("SELECT * FROM cloud_history WHERE owner=:owner ORDER BY max(localAt,serverAt) DESC") abstract suspend fun history(owner: String): List<CloudHistoryRow>
+    @Query("SELECT * FROM cloud_history WHERE owner=:owner ORDER BY max(localAt,serverAt) DESC, serverAt DESC, id DESC") abstract suspend fun history(owner: String): List<CloudHistoryRow>
     @Query("SELECT * FROM cloud_subscriptions WHERE owner=:owner ORDER BY id DESC") abstract suspend fun subscriptions(owner: String): List<CloudSubscriptionRow>
     @Query("SELECT * FROM sync_outbox WHERE owner=:owner ORDER BY revision") abstract suspend fun pending(owner: String): List<SyncRow>
     @Upsert abstract suspend fun putHistory(row: CloudHistoryRow)
@@ -28,16 +28,19 @@ abstract class CloudDao {
     @Query("DELETE FROM sync_outbox WHERE owner=:owner AND kind=:kind AND id=:id AND revision=:revision") abstract suspend fun acknowledge(owner: String, kind: String, id: Long, revision: Long): Int
     @Query("UPDATE sync_outbox SET attempts=:attempts,nextAt=:nextAt WHERE owner=:owner AND kind=:kind AND id=:id AND revision=:revision") abstract suspend fun defer(owner: String, kind: String, id: Long, revision: Long, attempts: Int, nextAt: Long)
     @Transaction open suspend fun record(row: CloudHistoryRow, revision: Long) {
+        val existing = history(row.owner).firstOrNull { it.id == row.id }
+        if (row.localAt <= 0 || existing != null && (row.localAt < maxOf(existing.localAt, existing.serverAt) ||
+                row.localAt == existing.serverAt && existing.serverAt > 0)) return
         val previous = pending(row.owner).firstOrNull { it.kind == "history" && it.id == row.id }
         putHistory(row); enqueue(SyncRow(row.owner, "history", row.id, revision, previous?.attempts ?: 0, previous?.nextAt ?: 0))
     }
     @Transaction open suspend fun subscribe(row: CloudSubscriptionRow, revision: Long) {
         putSubscription(row); enqueue(SyncRow(row.owner, "subscription", row.id, revision))
     }
-    @Transaction open suspend fun reconcile(owner: String, remote: CloudSnapshot) {
+    @Transaction open suspend fun mergeHistory(owner: String, rows: List<CloudHistoryRow>) {
         val outbox = pending(owner)
         val localHistory = history(owner).associateBy { it.id }
-        for (row in remote.history) {
+        for (row in rows.filter { it.serverAt > 0 }.groupBy { it.id }.values.map { rows -> rows.maxBy { it.serverAt } }) {
             val local = localHistory[row.id]
             // Explicit policy: later event timestamp wins; ties prefer confirmed server data.
             // Pending local writes are retained when newer; never compare playback positions.
@@ -46,6 +49,11 @@ abstract class CloudDao {
                 outbox.firstOrNull { it.kind == "history" && it.id == row.id }?.let { acknowledge(owner, it.kind, it.id, it.revision) }
             }
         }
+    }
+    @Transaction open suspend fun reconcile(owner: String, remote: CloudSnapshot) {
+        if (remote.historyFailure == null) mergeHistory(owner, remote.history)
+        val outbox = pending(owner)
+        if (remote.subscriptionFailure != null) return
         val pendingSubs = outbox.filter { it.kind == "subscription" }.map { it.id }.toSet()
         val remoteIds = remote.subscriptions.map { it.id }.toSet()
         for (local in subscriptions(owner)) {

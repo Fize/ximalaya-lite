@@ -287,14 +287,14 @@ fun syncViewText(cloud: CloudState): String = when (syncViewState(cloud)) {
         } else {
             val remote = if (cloudVisible) cloud.history else emptyList()
             // Display one row per episode, prefer local progress if it was heard more recently.
-            val localRows = local.history.filter { row -> remote.none { it.id == row.id && maxOf(it.localAt, it.serverAt) > row.updatedAt } }
+            val localRows = local.history.filter { row -> remote.none { it.id == row.id && maxOf(it.localAt, it.serverAt) >= row.updatedAt } }
             val remoteRows = remote.filter { row -> localRows.none { it.id == row.id } }
             if (localRows.isEmpty() && remoteRows.isEmpty()) item { Column(Modifier.padding(vertical = 40.dp)) { Text("还没有收听记录"); TextButton(onClick = onDiscover) { Text("去发现") } } }
             items((localRows.map { it.id to it.updatedAt } + remoteRows.map { it.id to maxOf(it.localAt, it.serverAt) }).sortedByDescending { it.second }, key = { "history-${it.first}" }) { (id, _) ->
                 val row = localRows.firstOrNull { it.id == id }
                 val remoteRow = remoteRows.firstOrNull { it.id == id }
                 if (row != null) ListeningRow(row.title, if (row.completed) "已听完" else "听到 ${row.positionMs / 60000} 分钟", pendingId == id, playing && currentId == id, { onHistory(row) })
-                else if (remoteRow != null) ListeningRow(remoteRow.title, "听到 ${remoteRow.positionMs / 60000} 分钟", pendingId == id, playing && currentId == id, { if (currentId == id) onCurrentPlayback() else onCloudHistory(remoteRow) })
+                else if (remoteRow != null) ListeningRow(remoteRow.title, "听到 ${remoteRow.positionMs / 60000} 分钟", pendingId == id, playing && currentId == id, { if (currentId == id && playing) onCurrentPlayback() else onCloudHistory(remoteRow) })
             }
         }
     } }

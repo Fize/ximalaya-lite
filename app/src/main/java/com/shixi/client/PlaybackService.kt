@@ -74,12 +74,16 @@ class PlaybackService : MediaSessionService() {
         return durations[track.id] ?: (store.state.value.history + store.state.value.accountHistory)
             .firstOrNull { it.id == track.id && it.albumId == track.albumId && it.owner == owner && it.durationMs > 0 }?.durationMs ?: 0
     }
+    private val listeningEvents = ListeningEvents()
+    private var explicitListeningEvent = false
+    private var lastListeningEvent: HistoryRow? = null
     private fun history(item: MediaItem?, position: Long, duration: Long, completed: Boolean = false): HistoryRow? {
         val track = item?.let(PlaybackItems::item) ?: return null
         if (track.id !in heard) return null
-        return HistoryRow(owner = accountLease?.owner ?: LOCAL_OWNER, id = track.id, albumId = track.albumId, page = track.page, title = track.title,
+        val row = HistoryRow(owner = accountLease?.owner ?: LOCAL_OWNER, id = track.id, albumId = track.albumId, page = track.page, title = track.title,
             cover = track.cover, positionMs = position.coerceAtLeast(0), durationMs = (duration.takeIf { it > 0 } ?: durations[track.id] ?: store.state.value.history.firstOrNull { it.id == track.id }?.durationMs ?: 0).coerceAtLeast(0),
             completed = completed, updatedAt = System.currentTimeMillis())
+        return listeningEvents.stamp(row, explicitListeningEvent).also { explicitListeningEvent = false; lastListeningEvent = it }
     }
     private fun restoreRecords() {
         if (storageReady) return
@@ -103,9 +107,9 @@ class PlaybackService : MediaSessionService() {
     private fun unavailable(): ListenableFuture<*> = Futures.immediateFailedFuture<Void>(IllegalStateException("正在恢复本机记录"))
     companion object { var active: PlaybackService? = null; private set }
     private val networkCallback = object : ConnectivityManager.NetworkCallback() {
-        override fun onAvailable(network: Network) { handler.post { if (!destroyed) recovery.tryPending() } }
+        override fun onAvailable(network: Network) { handler.post { if (!destroyed) { recovery.tryPending(); cloudSync.resume() } } }
         override fun onCapabilitiesChanged(network: Network, caps: NetworkCapabilities) {
-            if (caps.hasCapability(NetworkCapabilities.NET_CAPABILITY_VALIDATED)) handler.post { if (!destroyed) recovery.tryPending() }
+            if (caps.hasCapability(NetworkCapabilities.NET_CAPABILITY_VALIDATED)) handler.post { if (!destroyed) { recovery.tryPending(); cloudSync.resume() } }
         }
     }
     private fun online(): Boolean = connectivity.activeNetwork?.let { network -> connectivity.getNetworkCapabilities(network)
@@ -145,6 +149,9 @@ class PlaybackService : MediaSessionService() {
             putBoolean("albumBefore", if (::albumQueue.isInitialized) albumQueue.before else false)
             putBoolean("albumAfter", if (::albumQueue.isInitialized) albumQueue.after else false)
             putString("albumIssue", if (::albumQueue.isInitialized) albumQueue.issue else "")
+            putString("listeningOwner", lastListeningEvent?.owner.orEmpty())
+            putLong("listeningTrack", lastListeningEvent?.id ?: 0)
+            putLong("listeningAt", lastListeningEvent?.updatedAt ?: 0)
             putBoolean("storageReady", storageReady)
             putString("durationMediaId", engine.currentMediaItem?.mediaId.orEmpty())
             putLong("durationMs", knownDuration())
@@ -280,7 +287,15 @@ class PlaybackService : MediaSessionService() {
             override fun handleSetMediaItems(mediaItems: MutableList<MediaItem>, startIndex: Int, startPositionMs: Long): ListenableFuture<*> {
                 if (!storageReady) return unavailable()
                 recovery.cancel()
+                // Selecting a saved record only previews its cursor; it is not a listen.
+                snapshot()
+                engine.pause()
+                heard.clear()
                 manualSeekTrack = 0; manualSeekAlbum = 0; manualSeekAt = 0
+                lastListeningEvent = null
+                explicitListeningEvent = false
+                accountLease = accounts.lease()
+                accountTrack = 0
                 val selected = mediaItems.getOrNull(if (startIndex == C.INDEX_UNSET) 0 else startIndex)
                 val result = super.handleSetMediaItems(listOfNotNull(selected).toMutableList(), 0, startPositionMs)
                 albumQueue.reset(); albumQueue.ensure()
@@ -357,6 +372,7 @@ class PlaybackService : MediaSessionService() {
                 skipPolicy.reset(); recovery.cancel(); snapshot(); handler.post { if (!destroyed) albumQueue.prefetch() }
             }
             override fun onIsPlayingChanged(playing: Boolean) { if (playing) {
+                explicitListeningEvent = true
                 StartupTiming.mark("playing")
                 recovery.onPlaying(); snapshot()
             } }
@@ -365,13 +381,14 @@ class PlaybackService : MediaSessionService() {
             override fun onPositionDiscontinuity(old: Player.PositionInfo, new: Player.PositionInfo, reason: Int) {
                 // A paused seek after restart updates an existing listened breakpoint too.
                 if (storageReady && reason == Player.DISCONTINUITY_REASON_SEEK && old.mediaItem?.mediaId == new.mediaItem?.mediaId) {
-                    new.mediaItem?.let(PlaybackItems::item)?.takeIf { item -> store.state.value.history.any { it.id == item.id } }?.let { heard.add(it.id) }
+                    new.mediaItem?.let(PlaybackItems::item)?.takeIf { item -> (store.state.value.history + store.state.value.accountHistory).any { it.id == item.id && it.owner == (accountLease?.owner ?: LOCAL_OWNER) } }?.let { heard.add(it.id) }
                 }
                 history(old.mediaItem, old.positionMs, if (old.mediaItem?.mediaId == new.mediaItem?.mediaId) engine.duration else C.TIME_UNSET,
                     reason == Player.DISCONTINUITY_REASON_AUTO_TRANSITION)?.let { row ->
                     store.history(storeEpoch, row)
                     cloudSync.record(accountLease, row)
                 }
+                if (reason == Player.DISCONTINUITY_REASON_SEEK) explicitListeningEvent = true
                 snapshot()
             }
             override fun onPlaybackParametersChanged(parameters: androidx.media3.common.PlaybackParameters) { snapshot() }

@@ -14,7 +14,7 @@ import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.asStateFlow
 import kotlinx.coroutines.flow.first
 
-// Only local/guest records exist in this phase. Account cloud data is never read or written.
+// Guest records remain separate from account-owned listening history.
 const val LOCAL_OWNER = "guest"
 @Entity(tableName = "queue", primaryKeys = ["owner", "ordinal"])
 data class QueueRow(val owner: String = LOCAL_OWNER, val ordinal: Int, val id: Long, val albumId: Long,
@@ -52,6 +52,7 @@ abstract class ListeningDao {
     @Upsert abstract suspend fun upsertHistory(row: HistoryRow)
     @Transaction open suspend fun putHistory(row: HistoryRow) {
         val previous = historyItem(row.id, row.owner)
+        if (previous != null && previous.updatedAt > row.updatedAt) return
         // Preparing/stopping at the saved end is not another unfinished listen.
         // A seek/replay away from the end clears completion in FIFO order.
         val stillAtEnd = previous?.completed == true && row.positionMs >= previous.positionMs - 1000

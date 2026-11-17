@@ -15,12 +15,16 @@ data class CloudState(val owner: String = "", val history: List<CloudHistoryRow>
 class CloudSync internal constructor(private val account: AccountManager, private val dao: CloudDao,
     private val gateway: CloudGateway, private val scope: CoroutineScope = CoroutineScope(SupervisorJob() + Dispatchers.IO),
     private val clock: () -> Long = System::currentTimeMillis,
-    private val guestMerge: GuestHistoryMerge? = null) {
+    private val guestMerge: GuestHistoryMerge? = null,
+    private val retryDelay: (Int) -> Long = ::backoff,
+    private val localHistory: suspend (String) -> List<HistoryRow> = { emptyList() }) {
     private val work = Channel<suspend () -> Unit>(Channel.UNLIMITED)
     private val mutable = MutableStateFlow(CloudState())
     val state = mutable.asStateFlow()
     private var retry: Job? = null
     private var revision = clock()
+    private var readAttempts = 0
+    private val requested = java.util.concurrent.atomic.AtomicBoolean(false)
     init {
         scope.launch { for (task in work) try { task() } catch (cancelled: CancellationException) { throw cancelled }
             catch (error: Exception) { mutable.value = mutable.value.copy(busy = false, message = "账号记录处理失败，原记录保留，请重试", problem = SyncProblem.from("本机记录处理", error)) } }
@@ -31,7 +35,7 @@ class CloudSync internal constructor(private val account: AccountManager, privat
             observed = lease
             // Hide the previous account immediately, before queued I/O or network completes.
             if (mutable.value.owner != lease?.owner.orEmpty()) mutable.value = CloudState(owner = lease?.owner.orEmpty())
-            retry?.cancel()
+            retry?.cancel(); readAttempts = 0
             if (lease != null) submit { if (account.current(lease)) { refresh(lease); synchronize(lease, false) } }
         } }
     }
@@ -42,7 +46,13 @@ class CloudSync internal constructor(private val account: AccountManager, privat
         if (account.current(lease)) mutable.value = CloudState(lease.owner, histories, subs, pending.size, false,
             message ?: if (pending.isEmpty()) "账号记录已读取，尚未核对服务器" else "${pending.size}项待同步；离线修改尚未由服务器确认", problem)
     }
-    fun sync() { val lease = account.lease() ?: return; submit { synchronize(lease, true) } }
+    fun sync() = requestSync(true)
+    fun resume() = requestSync(false)
+    private fun requestSync(manual: Boolean) {
+        val lease = account.lease() ?: return
+        if (!requested.compareAndSet(false, true)) return
+        submit { try { synchronize(lease, manual) } finally { requested.set(false) } }
+    }
     fun toggle(item: Item, expectedOwner: String? = null) {
         require(item.id > 0)
         val lease = account.lease() ?: return
@@ -57,13 +67,13 @@ class CloudSync internal constructor(private val account: AccountManager, privat
         val playback = lease?.let(account::renewPlayback) ?: return
         submit { account.renewPlayback(playback)?.let { lease ->
             val previous = dao.history(lease.owner).firstOrNull { it.id == row.id }
-            // Timeline/list changes while paused must not create a new cloud listening event.
-            if (previous != null && previous.albumId == row.albumId &&
-                previous.positionMs / 1000 == row.positionMs / 1000) return@let
+            if (previous != null && (row.updatedAt < maxOf(previous.localAt, previous.serverAt) ||
+                row.updatedAt == previous.serverAt && previous.serverAt > 0 ||
+                row.updatedAt == previous.localAt && previous.positionMs == row.positionMs && previous.completed == row.completed)) return@let
             dao.record(CloudHistoryRow(lease.owner, row.id, row.albumId, row.title, row.cover,
                 row.positionMs, row.durationMs, row.completed, row.updatedAt), nextRevision())
             refresh(lease)
-            val pending = dao.pending(lease.owner).first { it.kind == "history" && it.id == row.id }
+            val pending = dao.pending(lease.owner).firstOrNull { it.kind == "history" && it.id == row.id } ?: return@let
             if (pending.attempts < 5 && pending.nextAt != Long.MAX_VALUE) schedule(lease, maxOf(5_000, pending.nextAt - clock()))
         } }
     }
@@ -71,19 +81,38 @@ class CloudSync internal constructor(private val account: AccountManager, privat
         retry?.cancel(); retry = scope.launch { delay(delayMs.coerceAtLeast(1_000)); submit { synchronize(lease, false) } }
     }
     private fun confirmed(op: SyncRow, remote: CloudSnapshot, history: CloudHistoryRow?, sub: CloudSubscriptionRow?): Boolean =
-        if (op.kind == "subscription") remote.subscriptions.any { it.id == op.id } == sub?.subscribed
-        else history != null && remote.history.any { it.albumId == history.albumId && it.serverAt >= history.localAt }
+        if (op.kind == "subscription") remote.subscriptionFailure == null && remote.subscriptions.any { it.id == op.id } == sub?.subscribed
+        else remote.historyFailure == null && history != null && remote.history.any { it.albumId == history.albumId && it.serverAt > 0 && it.serverAt >= history.localAt }
+
+    private suspend fun readRemote(lease: AccountLease): CloudSnapshot = gateway.readIndependent(lease) { histories ->
+        if (account.current(lease)) {
+            dao.mergeHistory(lease.owner, histories)
+            refresh(lease)
+            if (account.current(lease)) mutable.value = mutable.value.copy(busy = true)
+        }
+    }
 
     private suspend fun synchronize(lease: AccountLease, manual: Boolean) {
         if (!account.current(lease)) return
         retry?.cancel(); mutable.value = mutable.value.copy(busy = true, message = "正在核对服务器…")
         var stage = "本机记录合并"
+        var affectedKind: String? = null
         try {
             guestMerge?.stage(lease, dao, account::current, ::nextRevision)
+            // A process may die after the player persisted a local event but before this
+            // worker got past an in-flight request. Recover that durable event first.
+            val retained = dao.history(lease.owner).associateBy { it.id }
+            for (row in localHistory(lease.owner)) {
+                if (!account.current(lease)) return
+                val previous = retained[row.id]
+                if (row.owner == lease.owner && row.updatedAt > (previous?.let { maxOf(it.localAt, it.serverAt) } ?: 0))
+                    dao.record(CloudHistoryRow(lease.owner, row.id, row.albumId, row.title, row.cover,
+                        row.positionMs, row.durationMs, row.completed, row.updatedAt), nextRevision())
+            }
             if (!account.current(lease)) return
             // Query before every resend: a previous timeout may have happened after acceptance.
             stage = "账号记录读取"
-            var remote = gateway.read(lease)
+            var remote = readRemote(lease)
             if (!account.current(lease)) return
             dao.reconcile(lease.owner, remote)
             val histories = dao.history(lease.owner).associateBy { it.id }
@@ -98,10 +127,12 @@ class CloudSync internal constructor(private val account: AccountManager, privat
             for (op in pending) {
                 if (!account.current(lease)) return
                 val history = histories[op.id]; val sub = subscriptions[op.id]
+                if (op.kind == "history" && remote.historyFailure != null || op.kind == "subscription" && remote.subscriptionFailure != null) continue
                 if (confirmed(op, remote, history, sub)) { dao.acknowledge(op.owner, op.kind, op.id, op.revision); continue }
                 if (op.kind == "history" && history != null && latest[history.albumId]?.id != op.id) continue
                 if (!manual && (op.attempts >= 5 || op.nextAt > clock())) continue
                 stage = if (op.kind == "history") "进度上传" else "订阅更新"
+                affectedKind = op.kind
                 if (op.kind == "history" && history != null) gateway.progress(lease, history)
                 else if (op.kind == "subscription" && sub != null) gateway.subscription(lease, sub)
                 else continue
@@ -110,18 +141,29 @@ class CloudSync internal constructor(private val account: AccountManager, privat
             if (sent.isNotEmpty()) {
                 if (!account.current(lease)) return
                 stage = "同步结果确认"
-                remote = gateway.read(lease)
+                affectedKind = null
+                remote = readRemote(lease)
                 if (!account.current(lease)) return
                 val sentAlbums = sent.filter { it.kind == "history" }.mapNotNull { histories[it.id]?.albumId }.toSet()
                 for (op in pending) {
                     if (confirmed(op, remote, histories[op.id], subscriptions[op.id])) dao.acknowledge(op.owner, op.kind, op.id, op.revision)
-                    else if (op in sent || op.kind == "history" && histories[op.id]?.albumId in sentAlbums)
+                    else if ((op.kind == "history" && remote.historyFailure == null || op.kind == "subscription" && remote.subscriptionFailure == null) &&
+                        (op in sent || op.kind == "history" && histories[op.id]?.albumId in sentAlbums))
                         dao.defer(op.owner, op.kind, op.id, op.revision, op.attempts + 1, clock() + backoff(op.attempts + 1))
                 }
                 dao.reconcile(lease.owner, remote)
             }
             if (!account.current(lease)) return
             dao.reconcile(lease.owner, remote)
+            if (remote.historyFailure != null || remote.subscriptionFailure != null) {
+                affectedKind = when {
+                    remote.historyFailure == null -> "subscription"
+                    remote.subscriptionFailure == null -> "history"
+                    else -> null
+                }
+                throw (remote.historyFailure ?: remote.subscriptionFailure)!!
+            }
+            readAttempts = 0
             val remaining = dao.pending(lease.owner)
             refresh(lease, if (remaining.isEmpty()) "服务器核对完成" else "${remaining.size}项尚未由服务器确认，可稍后重试")
             remaining.filter { it.attempts < 5 }.minOfOrNull { (it.nextAt - clock()).coerceAtLeast(30_000) }?.let { schedule(lease, it) }
@@ -132,10 +174,13 @@ class CloudSync internal constructor(private val account: AccountManager, privat
             else {
                 val pending = dao.pending(lease.owner)
                 val retryable = error !is CloudFailure || error.retryable
-                for (op in pending) dao.defer(op.owner, op.kind, op.id, op.revision, op.attempts + 1, (if (!retryable) Long.MAX_VALUE else clock() + backoff(op.attempts + 1)))
+                for (op in pending.filter { affectedKind == null || it.kind == affectedKind }) dao.defer(op.owner, op.kind, op.id, op.revision, op.attempts + 1, (if (!retryable) Long.MAX_VALUE else clock() + backoff(op.attempts + 1)))
                 refresh(lease, if (error is CloudFailure) error.message else "网络不可用或同步失败，原账号待同步记录已保留", SyncProblem.from(stage, error))
                 // Business rejections require user action; do not repeatedly replay risk checks.
-                if (retryable) pending.filter { it.attempts + 1 < 5 }.minOfOrNull { backoff(it.attempts + 1) }?.let { schedule(lease, it) }
+                if (retryable) {
+                    readAttempts++
+                    if (readAttempts < 5) schedule(lease, retryDelay(readAttempts))
+                }
             }
         } finally { if (account.current(lease)) mutable.value = mutable.value.copy(busy = false) }
     }
@@ -148,7 +193,8 @@ class CloudSync internal constructor(private val account: AccountManager, privat
             instance ?: context.applicationContext.let { app ->
                 val database = ListeningDatabase.open(app)
                 CloudSync(AccountManager.get(app), database.cloud(), CloudApi(app),
-                    guestMerge = GuestHistoryMerge(java.io.File(app.noBackupFilesDir, "first-account-history-v1"), database.records()))
+                    guestMerge = GuestHistoryMerge(java.io.File(app.noBackupFilesDir, "first-account-history-v1"), database.records()),
+                    localHistory = { owner -> database.records().history(owner) })
             }.also { instance = it }
         }
     }
