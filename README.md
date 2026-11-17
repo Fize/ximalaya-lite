@@ -37,3 +37,7 @@
 ```
 
 生成的安装包位于 `app/build/outputs/apk/debug/app-debug.apk`。
+
+## 许可
+
+本项目原创代码采用 [AGPL-3.0](LICENSE)。第三方依赖及原生组件的权利归属见[第三方组件说明](THIRD_PARTY_NOTICES.md)。
