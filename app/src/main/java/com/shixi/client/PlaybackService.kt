@@ -64,6 +64,16 @@ class PlaybackService : MediaSessionService() {
     private val serviceScope = CoroutineScope(SupervisorJob() + Dispatchers.Main.immediate)
     private val heard = mutableSetOf<Long>()
     private val durations = mutableMapOf<Long, Long>()
+    private var manualSeekTrack = 0L
+    private var manualSeekAlbum = 0L
+    private var manualSeekAt = 0L
+    private fun knownDuration(): Long {
+        if (engine.duration > 0) return engine.duration
+        val track = engine.currentMediaItem?.let(PlaybackItems::item) ?: return 0
+        val owner = AccountManager.get(this).lease()?.owner ?: LOCAL_OWNER
+        return durations[track.id] ?: (store.state.value.history + store.state.value.accountHistory)
+            .firstOrNull { it.id == track.id && it.albumId == track.albumId && it.owner == owner && it.durationMs > 0 }?.durationMs ?: 0
+    }
     private fun history(item: MediaItem?, position: Long, duration: Long, completed: Boolean = false): HistoryRow? {
         val track = item?.let(PlaybackItems::item) ?: return null
         if (track.id !in heard) return null
@@ -79,6 +89,7 @@ class PlaybackService : MediaSessionService() {
                 if (destroyed || storageReady) return@launch
                 val selected = saved.queue.getOrNull(saved.index)
                 engine.setMediaItems(listOfNotNull(selected).map(PlaybackItems::mediaItem), 0, saved.positionMs)
+                if (selected != null && saved.manualSeekAt > 0) { manualSeekTrack = selected.id; manualSeekAlbum = selected.albumId; manualSeekAt = saved.manualSeekAt }
                 albumQueue.reset()
                 engine.setPlaybackSpeed(saved.speed)
                 engine.pause() // Do not prepare: no authorization/address request before explicit play.
@@ -135,6 +146,11 @@ class PlaybackService : MediaSessionService() {
             putBoolean("albumAfter", if (::albumQueue.isInitialized) albumQueue.after else false)
             putString("albumIssue", if (::albumQueue.isInitialized) albumQueue.issue else "")
             putBoolean("storageReady", storageReady)
+            putString("durationMediaId", engine.currentMediaItem?.mediaId.orEmpty())
+            putLong("durationMs", knownDuration())
+            putLong("manualSeekTrack", manualSeekTrack)
+            putLong("manualSeekAlbum", manualSeekAlbum)
+            putLong("manualSeekAt", manualSeekAt)
             putString("storageIssue", if (::store.isInitialized) store.state.value.issue else "")
             putLong("savedRevision", if (::store.isInitialized) store.state.value.savedRevision else 0)
             putString("playbackIssue", recovery.issue); putInt("retryAttempts", recovery.attempts)
@@ -150,9 +166,10 @@ class PlaybackService : MediaSessionService() {
             if (it.id != accountTrack) accountTrack = it.id
             heard.add(it.id)
         }
-        if (engine.duration > 0) engine.currentMediaItem?.let(PlaybackItems::item)?.let { durations[it.id] = engine.duration }
+        val knownDuration = knownDuration()
+        if (knownDuration > 0) engine.currentMediaItem?.let(PlaybackItems::item)?.let { durations[it.id] = knownDuration }
         val saved = PlaybackSnapshot((0 until engine.mediaItemCount).mapNotNull { PlaybackItems.item(engine.getMediaItemAt(it)) },
-            engine.currentMediaItemIndex, engine.currentPosition.coerceAtLeast(0), engine.playbackParameters.speed, snapshotAt)
+            engine.currentMediaItemIndex, engine.currentPosition.coerceAtLeast(0), engine.playbackParameters.speed, snapshotAt, manualSeekAt)
         PlaybackSnapshots.publish(saved)
         val record = history(engine.currentMediaItem, engine.currentPosition, engine.duration, engine.playbackState == Player.STATE_ENDED)
         store.save(storeEpoch, saved, record, snapshotRevision)
@@ -263,6 +280,7 @@ class PlaybackService : MediaSessionService() {
             override fun handleSetMediaItems(mediaItems: MutableList<MediaItem>, startIndex: Int, startPositionMs: Long): ListenableFuture<*> {
                 if (!storageReady) return unavailable()
                 recovery.cancel()
+                manualSeekTrack = 0; manualSeekAlbum = 0; manualSeekAt = 0
                 val selected = mediaItems.getOrNull(if (startIndex == C.INDEX_UNSET) 0 else startIndex)
                 val result = super.handleSetMediaItems(listOfNotNull(selected).toMutableList(), 0, startPositionMs)
                 albumQueue.reset(); albumQueue.ensure()
@@ -277,11 +295,29 @@ class PlaybackService : MediaSessionService() {
                     .setAvailableSessionCommands(result.availableSessionCommands)
                     .setAvailablePlayerCommands(result.availablePlayerCommands.buildUpon().remove(Player.COMMAND_SET_MEDIA_ITEM).remove(Player.COMMAND_CHANGE_MEDIA_ITEMS).build()).build()
                 return MediaSession.ConnectionResult.AcceptedResultBuilder(session).setAvailableSessionCommands(result.availableSessionCommands.buildUpon()
-                    .add(SessionCommand("com.shixi.client.ALBUM", Bundle.EMPTY)).add(SessionCommand("com.shixi.client.SAVE", Bundle.EMPTY)).add(SessionCommand("com.shixi.client.SLEEP", Bundle.EMPTY)).add(SessionCommand("com.shixi.client.RETRY", Bundle.EMPTY)).build()).build()
+                    .add(SessionCommand("com.shixi.client.CURSOR", Bundle.EMPTY)).add(SessionCommand("com.shixi.client.ALBUM", Bundle.EMPTY)).add(SessionCommand("com.shixi.client.SAVE", Bundle.EMPTY)).add(SessionCommand("com.shixi.client.SLEEP", Bundle.EMPTY)).add(SessionCommand("com.shixi.client.RETRY", Bundle.EMPTY)).build()).build()
             }
             override fun onCustomCommand(session: MediaSession, controller: MediaSession.ControllerInfo, command: SessionCommand, args: Bundle): ListenableFuture<SessionResult> {
                 if (controller.packageName != packageName) return Futures.immediateFuture(SessionResult(androidx.media3.session.SessionError.ERROR_PERMISSION_DENIED))
                 return when (command.customAction) {
+                    "com.shixi.client.CURSOR" -> {
+                        val track = engine.currentMediaItem?.let(PlaybackItems::item)
+                        val duration = knownDuration()
+                        if (!storageReady || track == null || duration <= 0)
+                            Futures.immediateFuture(SessionResult(androidx.media3.session.SessionError.ERROR_INVALID_STATE))
+                        else if (args.getLong("trackId") != track.id || args.getLong("albumId") != track.albumId || args.getLong("positionMs", -1) < 0)
+                            Futures.immediateFuture(SessionResult(androidx.media3.session.SessionError.ERROR_BAD_VALUE))
+                        else {
+                            recovery.userIntent(); albumQueue.cancelIntent()
+                            manualSeekTrack = track.id; manualSeekAlbum = track.albumId
+                            manualSeekAt = maxOf(System.currentTimeMillis(), manualSeekAt + 1)
+                            // IDLE timelines do not expose the normal seek command. Moving the
+                            // saved cursor must not prepare, authorize or start the audio.
+                            engine.seekTo(engine.currentMediaItemIndex, args.getLong("positionMs").coerceAtMost(duration))
+                            snapshot()
+                            Futures.immediateFuture(SessionResult(SessionResult.RESULT_SUCCESS))
+                        }
+                    }
                     "com.shixi.client.ALBUM" -> {
                         if (!storageReady) return Futures.immediateFuture(SessionResult(androidx.media3.session.SessionError.ERROR_INVALID_STATE))
                         when (args.getString("action")) {
@@ -316,7 +352,10 @@ class PlaybackService : MediaSessionService() {
                 if (!ready) { recovery.cancel(clearIssue = false); albumQueue.cancelIntent() }
                 snapshot()
             }
-            override fun onMediaItemTransition(item: MediaItem?, reason: Int) { skipPolicy.reset(); recovery.cancel(); snapshot(); handler.post { if (!destroyed) albumQueue.prefetch() } }
+            override fun onMediaItemTransition(item: MediaItem?, reason: Int) {
+                if (item?.let(PlaybackItems::item)?.let { it.id == manualSeekTrack && it.albumId == manualSeekAlbum } != true) { manualSeekTrack = 0; manualSeekAlbum = 0; manualSeekAt = 0 }
+                skipPolicy.reset(); recovery.cancel(); snapshot(); handler.post { if (!destroyed) albumQueue.prefetch() }
+            }
             override fun onIsPlayingChanged(playing: Boolean) { if (playing) {
                 StartupTiming.mark("playing")
                 recovery.onPlaying(); snapshot()

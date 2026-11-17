@@ -3,6 +3,7 @@ package com.shixi.client
 import android.content.Context
 import androidx.datastore.preferences.core.edit
 import androidx.datastore.preferences.core.floatPreferencesKey
+import androidx.datastore.preferences.core.stringPreferencesKey
 import androidx.datastore.preferences.core.PreferenceDataStoreFactory
 import androidx.room.*
 import com.shixi.protocol.Item
@@ -40,6 +41,7 @@ data class SearchRow(val owner: String = LOCAL_OWNER, val query: String, val upd
 abstract class ListeningDao {
     @Query("SELECT * FROM queue WHERE owner = :owner ORDER BY ordinal") abstract suspend fun queue(owner: String = LOCAL_OWNER): List<QueueRow>
     @Query("SELECT * FROM cursor WHERE owner = :owner") abstract suspend fun cursor(owner: String = LOCAL_OWNER): CursorRow?
+    @Query("SELECT * FROM history WHERE owner != 'guest' ORDER BY updatedAt DESC, id DESC") abstract suspend fun accountHistory(): List<HistoryRow>
     @Query("SELECT * FROM history WHERE owner = :owner ORDER BY updatedAt DESC, id DESC") abstract suspend fun history(owner: String = LOCAL_OWNER): List<HistoryRow>
     @Query("SELECT * FROM following WHERE owner = :owner ORDER BY id DESC") abstract suspend fun follows(owner: String = LOCAL_OWNER): List<FollowRow>
     @Query("SELECT * FROM search_history WHERE owner = :owner ORDER BY updatedAt DESC") abstract suspend fun searches(owner: String = LOCAL_OWNER): List<SearchRow>
@@ -83,9 +85,9 @@ abstract class ListeningDatabase : RoomDatabase() {
             ListeningDatabase::class.java, File(context.noBackupFilesDir, name).absolutePath).addMigrations(MIGRATION_1_2).build()
     }
 }
-data class StoredPlayback(val queue: List<Item>, val index: Int, val positionMs: Long, val speed: Float)
+data class StoredPlayback(val queue: List<Item>, val index: Int, val positionMs: Long, val speed: Float, val manualSeekAt: Long = 0)
 data class ListeningData(val history: List<HistoryRow> = emptyList(), val follows: List<Item> = emptyList(),
-    val searches: List<String> = emptyList(), val loaded: Boolean = false, val issue: String = "", val savedRevision: Long = 0)
+    val searches: List<String> = emptyList(), val loaded: Boolean = false, val issue: String = "", val savedRevision: Long = 0, val accountHistory: List<HistoryRow> = emptyList())
 
 /** One application-scoped FIFO writer. Accepted old-service writes precede a new service's read.
  * The epoch rejects later callbacks from a disposed player; reads never replace a user's new queue.
@@ -98,7 +100,9 @@ class ListeningStore private constructor(context: Context) {
         File(context.noBackupFilesDir, "listening.preferences_pb")
     }
     private val speedKey = floatPreferencesKey("speed")
+    private val manualCursorKey = stringPreferencesKey("manual_cursor")
     private var lastSpeed = 1f
+    private var lastManualCursor = ""
     private val work = Channel<suspend () -> Unit>(Channel.UNLIMITED)
     private val mutable = MutableStateFlow(ListeningData())
     val state = mutable.asStateFlow()
@@ -112,16 +116,22 @@ class ListeningStore private constructor(context: Context) {
     private fun submit(task: suspend () -> Unit) { check(work.trySend(task).isSuccess) }
     private suspend fun refresh() {
         mutable.value = mutable.value.copy(history = dao.history(), follows = dao.follows().map { it.item() },
-            searches = dao.searches().map { it.query }, loaded = true, issue = "")
+            searches = dao.searches().map { it.query }, accountHistory = dao.accountHistory(), loaded = true, issue = "")
     }
     @Synchronized fun attachPlayer(): Long = ++epoch
     fun restore(): Deferred<StoredPlayback> {
         val result = CompletableDeferred<StoredPlayback>()
         submit { try {
             val rows = dao.queue(); val cursor = dao.cursor()
-            lastSpeed = (preferences.data.first()[speedKey] ?: 1f).takeIf { it.isFinite() && it in 0.5f..3f } ?: 1f
+            val prefs = preferences.data.first()
+            lastSpeed = (prefs[speedKey] ?: 1f).takeIf { it.isFinite() && it in 0.5f..3f } ?: 1f
+            lastManualCursor = prefs[manualCursorKey].orEmpty()
+            val selected = rows.getOrNull(if (rows.isEmpty()) 0 else (cursor?.index ?: 0).coerceIn(rows.indices))
+            val manual = lastManualCursor.split(":")
+            val seekAt = if (selected != null && manual.getOrNull(0)?.toLongOrNull() == selected.id && manual.getOrNull(1)?.toLongOrNull() == selected.albumId)
+                manual.getOrNull(2)?.toLongOrNull()?.coerceAtLeast(0) ?: 0 else 0
             refresh()
-            result.complete(StoredPlayback(rows.map { it.item() }, if (rows.isEmpty()) 0 else (cursor?.index ?: 0).coerceIn(rows.indices), cursor?.positionMs?.coerceAtLeast(0) ?: 0, lastSpeed))
+            result.complete(StoredPlayback(rows.map { it.item() }, if (rows.isEmpty()) 0 else (cursor?.index ?: 0).coerceIn(rows.indices), cursor?.positionMs?.coerceAtLeast(0) ?: 0, lastSpeed, seekAt))
         } catch (error: Exception) { result.completeExceptionally(error); throw error } }
         return result
     }
@@ -129,8 +139,11 @@ class ListeningStore private constructor(context: Context) {
         if (ownerEpoch != epoch) return
         submit {
             dao.save(snapshot, history)
-            if (snapshot.speed != lastSpeed) {
-                preferences.edit { it[speedKey] = snapshot.speed }; lastSpeed = snapshot.speed
+            val selected = snapshot.queue.getOrNull(snapshot.index)
+            val manual = if (selected != null && snapshot.manualSeekAt > 0) "${selected.id}:${selected.albumId}:${snapshot.manualSeekAt}" else ""
+            if (snapshot.speed != lastSpeed || manual != lastManualCursor) {
+                preferences.edit { it[speedKey] = snapshot.speed; it[manualCursorKey] = manual }
+                lastSpeed = snapshot.speed; lastManualCursor = manual
             }
             refresh()
             mutable.value = mutable.value.copy(savedRevision = revision)

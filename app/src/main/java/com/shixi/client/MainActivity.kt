@@ -189,6 +189,9 @@ class MainActivity : ComponentActivity() {
                 var playbackState by remember { mutableStateOf("未播放") }
                 var position by remember { mutableFloatStateOf(0f) }
                 var duration by remember { mutableFloatStateOf(0f) }
+                var pendingSeek by remember { mutableStateOf<Triple<Long, Long, Long>?>(null) }
+                var seekGeneration by remember { mutableIntStateOf(0) }
+                LaunchedEffect(currentTrack?.id, currentTrack?.albumId) { pendingSeek = null; seekGeneration++ }
                 var playbackSpeed by remember { mutableFloatStateOf(1f) }
                 DisposableEffect(Unit) {
                     fun syncPlayer() {
@@ -200,6 +203,11 @@ class MainActivity : ComponentActivity() {
                         playbackIssue = if (player.playerError != null && player.playWhenReady || player.sessionExtras.getString("playbackIssue").orEmpty().isNotBlank()) "暂时无法播放，请重试" else ""
                         playbackState = PlaybackItems.status(player)
                         playbackSpeed = player.playbackParameters.speed
+                        position = player.currentPosition.coerceAtLeast(0).toFloat()
+                        duration = PlaybackItems.duration(player).toFloat()
+                        // Headset/notification resume bypasses startTrack. Once audio runs,
+                        // the controller owns the live cursor rather than the paused preview.
+                        if (player.isPlaying) pendingSeek = null
                     }
                     val listener = object : Player.Listener {
                         override fun onEvents(player: Player, events: Player.Events) { syncPlayer() }
@@ -209,7 +217,29 @@ class MainActivity : ComponentActivity() {
                     } catch (_: Exception) { playbackState = "播放器连接失败"; connectionFailed = true } } }, androidx.core.content.ContextCompat.getMainExecutor(this@MainActivity))
                     onDispose { controller?.removeListener(listener) }
                 }
-                LaunchedEffect(controller) { while (true) { controller?.let { storageReady = it.sessionExtras.getBoolean("storageReady", false); position = it.currentPosition.toFloat(); duration = it.duration.coerceAtLeast(0).toFloat(); playbackState = PlaybackItems.status(it) }; val prefs = getSharedPreferences("sleep", MODE_PRIVATE); val deadline = if (prefs.getInt("boot", -2) == Settings.Global.getInt(contentResolver, Settings.Global.BOOT_COUNT, -1)) prefs.getLong("deadline", 0) else 0; sleepLabel = if (deadline == 0L) "关闭" else if (deadline > SystemClock.elapsedRealtime()) "约${(deadline - SystemClock.elapsedRealtime() + 59999) / 60000}分钟" else "即将停止"; delay(500) } }
+                LaunchedEffect(controller) { while (true) { controller?.let { storageReady = it.sessionExtras.getBoolean("storageReady", false); position = it.currentPosition.coerceAtLeast(0).toFloat(); duration = PlaybackItems.duration(it).toFloat(); playbackState = PlaybackItems.status(it) }; val prefs = getSharedPreferences("sleep", MODE_PRIVATE); val deadline = if (prefs.getInt("boot", -2) == Settings.Global.getInt(contentResolver, Settings.Global.BOOT_COUNT, -1)) prefs.getLong("deadline", 0) else 0; sleepLabel = if (deadline == 0L) "关闭" else if (deadline > SystemClock.elapsedRealtime()) "约${(deadline - SystemClock.elapsedRealtime() + 59999) / 60000}分钟" else "即将停止"; delay(500) } }
+                fun seekPlayback(target: Long) {
+                    val player = controller ?: return
+                    val track = currentTrack ?: return
+                    if (!storageReady || duration <= 0) return
+                    cancelPlaybackIntent()
+                    val point = target.coerceIn(0, duration.toLong())
+                    val ticket = ++seekGeneration
+                    pendingSeek = Triple(track.id, track.albumId, point)
+                    position = point.toFloat()
+                    val result = player.sendCustomCommand(SessionCommand("com.shixi.client.CURSOR", Bundle.EMPTY), Bundle().apply {
+                        putLong("trackId", track.id); putLong("albumId", track.albumId); putLong("positionMs", point)
+                    })
+                    result.addListener({
+                        if (ticket == seekGeneration) {
+                            val success = runCatching { result.get().resultCode == SessionResult.RESULT_SUCCESS }.getOrDefault(false)
+                            if (!success) {
+                                pendingSeek = null
+                                scope.launch { snackbars.showSnackbar("进度调整失败，请重试", withDismissAction = true) }
+                            } else if (player.playWhenReady) pendingSeek = null
+                        }
+                    }, androidx.core.content.ContextCompat.getMainExecutor(this@MainActivity))
+                }
                 fun mediaItem(track: Item, url: String): MediaItem = PlaybackItems.mediaItem(track)
                 fun run(action: suspend () -> Unit) { cancelRequest(); val generation = requestGeneration; loading = true; requestJob = scope.launch { try { action() } catch (e: CancellationException) { throw e } catch (e: Exception) { if (generation == requestGeneration) { message = com.shixi.protocol.userContentMessage(e); requestError = message } } finally { if (generation == requestGeneration) { loading = false; requestJob = null } } } }
                 fun navigateBack() {
@@ -242,13 +272,18 @@ class MainActivity : ComponentActivity() {
                     if (player == null || !storageReady) { message = "正在准备播放器…"; return }
                     if (entry.id <= 0 || entry.albumId <= 0) { message = "暂时无法打开该节目，请重试"; return }
                     val existing = (0 until player.mediaItemCount).firstOrNull {
-                        PlaybackItems.item(player.getMediaItemAt(it))?.let { it.id == entry.id && it.albumId == entry.albumId } == true
+                        PlaybackItems.item(player.getMediaItemAt(it))?.let { it.id == entry.id && it.albumId == entry.albumId && it.page == entry.page } == true
                     }
                     val saved = requestedHistory ?: local.history.firstOrNull { it.id == entry.id }
-                    val resume = if (saved?.completed == true) 0L else if (requestedHistory != null) requestedHistory.resumeMs else if (existing == player.currentMediaItemIndex) player.currentPosition else saved?.resumeMs ?: 0
+                    val current = player.currentMediaItem?.let(PlaybackItems::item)
+                    val sameTrack = current?.id == entry.id && current.albumId == entry.albumId
+                    val adjusted = if (requestedHistory == null && sameTrack) pendingSeek?.takeIf { it.first == entry.id && it.second == entry.albumId }?.third
+                        ?: if (player.sessionExtras.getLong("manualSeekTrack") == entry.id && player.sessionExtras.getLong("manualSeekAlbum") == entry.albumId && player.sessionExtras.getLong("manualSeekAt") >= (saved?.updatedAt ?: 0)) player.currentPosition else null else null
+                    val resume = adjusted ?: if (saved?.completed == true) 0L else if (requestedHistory != null) requestedHistory.resumeMs else if (existing == player.currentMediaItemIndex) player.currentPosition else saved?.resumeMs ?: 0
                     if (existing != null && player.playbackState != Player.STATE_IDLE) player.seekTo(existing, resume)
                     else player.setMediaItems(listOf(PlaybackItems.mediaItem(entry)), 0, resume)
                     player.prepare(); player.play()
+                    pendingSeek = null
                     message = entry.title
                 }
                 LaunchedEffect(accountState) {
@@ -256,7 +291,7 @@ class MainActivity : ComponentActivity() {
                     albumEntries = ArrayList(albumEntries.map(downgrade))
                     tracksByTab.keys.toList().forEach { tracksByTab[it] = tracksByTab[it].orEmpty().map(downgrade) }
                 }
-                fun authorizeTrack(entry: Item, action: () -> Unit) {
+                fun authorizeTrack(entry: Item, action: (Item) -> Unit) {
                     if (checkingAccess && pendingTrackId == entry.id) return
                     cancelPlaybackIntent(); failedTrackId = entry.id; accessMessage = null; retryAccess = null
                     if (entry.access in setOf(com.shixi.protocol.ListeningAccess.TRIAL, com.shixi.protocol.ListeningAccess.UNAVAILABLE)) {
@@ -287,7 +322,7 @@ class MainActivity : ComponentActivity() {
                             val mark: (Item) -> Item = { if (it.id == verified.id && it.albumId == verified.albumId) it.copy(free = verified.free, access = verified.access) else it }
                             albumEntries = ArrayList(albumEntries.map(mark))
                             tracksByTab.keys.toList().forEach { tracksByTab[it] = tracksByTab[it].orEmpty().map(mark) }
-                            accessMessage = null; failedTrackId = null; action()
+                            accessMessage = null; failedTrackId = null; action(verified)
                         } catch (cancelled: CancellationException) { throw cancelled }
                         catch (failure: Exception) {
                             if (ticket == playbackIntentGeneration && tab == destinationTab && (stack.toList() == destination || stack.toList() == destination + "player-$destinationTab")) {
@@ -298,14 +333,17 @@ class MainActivity : ComponentActivity() {
                         } finally { if (ticket == playbackIntentGeneration) { checkingAccess = false; pendingTrackId = null } }
                     }
                 }
-                fun playTrack(entry: Item, requestedHistory: HistoryRow? = null) { authorizeTrack(entry) { startTrack(entry, requestedHistory) } }
+                fun playTrack(entry: Item, requestedHistory: HistoryRow? = null) { authorizeTrack(entry) { verified -> startTrack(verified, requestedHistory) } }
                 @Composable fun AccessFeedback() {
                     accessMessage?.let { text -> FloatingNotice(text, if (guestAccess) { if (accountState.signedIn) "账号" else "登录" } else "重试", if (guestAccess) ({ openAccount() }) else retryAccess) }
                 }
                 fun togglePlayback() {
                     cancelPlaybackIntent()
                     val player = controller ?: return
-                    if (player.playWhenReady) player.pause() else if (currentTrack != null) startTrack(currentTrack!!) else message = "请先选择节目"
+                    if (player.playWhenReady) player.pause() else if (currentTrack != null) {
+                        if (player.playbackState == Player.STATE_READY && player.playerError == null) startTrack(currentTrack!!)
+                        else playTrack(currentTrack!!)
+                    } else message = "请先选择节目"
                 }
                 fun selectTrack(item: Item) { if (currentTrack?.id == item.id && controller?.playWhenReady == true) togglePlayback() else playTrack(item) }
                 fun playCloudHistory(row: CloudHistoryRow) {
@@ -331,7 +369,7 @@ class MainActivity : ComponentActivity() {
                 fun retryPlayback() {
                     val player = controller
                     if (player == null || player.currentMediaItem == null) { message = "请先选择节目"; return }
-                    player.sendCustomCommand(SessionCommand("com.shixi.client.RETRY", Bundle.EMPTY), Bundle.EMPTY); message = "正在重新连接"
+                    player.currentMediaItem?.let(PlaybackItems::item)?.let { playTrack(it) }
                 }
 
                 fun albumCommand(action: String, direction: Int = 1) {
@@ -423,10 +461,14 @@ class MainActivity : ComponentActivity() {
                     } else emptyMap()) {
                     Surface(modifier = Modifier.fillMaxSize(), color = MaterialTheme.colorScheme.background) {
                     if (key == "player-$tab") {
+                        var draggingPosition by remember(currentTrack?.id, currentTrack?.albumId) { mutableStateOf<Float?>(null) }
+                        // Read live progress inside the retained navigation entry, rather than
+                        // capturing an outer composition's one-time value in its content lambda.
+                        val shownPosition = draggingPosition ?: pendingSeek?.takeIf { it.first == currentTrack?.id && it.second == currentTrack?.albumId }?.third?.toFloat() ?: position
                         Column(Modifier.fillMaxSize().padding(padding).verticalScroll(rememberScrollState()).padding(horizontal = 20.dp), horizontalAlignment = Alignment.CenterHorizontally) {
                             Row(Modifier.fillMaxWidth().heightIn(min = 56.dp), verticalAlignment = Alignment.CenterVertically) {
                                 SymbolButton(AppIcon.Down, "收起", onClick = ::navigateBack)
-                                Text("正在播放", Modifier.weight(1f), textAlign = androidx.compose.ui.text.style.TextAlign.Center, style = MaterialTheme.typography.bodyMedium, color = MaterialTheme.colorScheme.onSurfaceVariant)
+                                Text(if (controller?.playWhenReady == true) playbackState else "已暂停", Modifier.weight(1f), textAlign = androidx.compose.ui.text.style.TextAlign.Center, style = MaterialTheme.typography.bodyMedium, color = MaterialTheme.colorScheme.onSurfaceVariant)
                                 Spacer(Modifier.width(48.dp))
                             }
                             Spacer(Modifier.height(20.dp)); CoverArtwork(playerAlbum.value?.cover?.ifBlank { currentTrack?.cover.orEmpty() } ?: currentTrack?.cover.orEmpty(), Modifier.width(240.dp).height(240.dp)); Spacer(Modifier.height(28.dp))
@@ -455,15 +497,15 @@ class MainActivity : ComponentActivity() {
                             if (local.issue.isNotBlank()) FloatingNotice("收听记录保存失败", onAction = ::retryStorage)
                             Spacer(Modifier.height(12.dp))
                             Row(Modifier.fillMaxWidth(), verticalAlignment = Alignment.CenterVertically) {
-                                SymbolButton(AppIcon.Replay, "后退15秒", controller?.isCommandAvailable(Player.COMMAND_SEEK_IN_CURRENT_MEDIA_ITEM) == true) { cancelPlaybackIntent(); controller?.seekTo((controller?.currentPosition ?: 0L).minus(15000).coerceAtLeast(0)) }
+                                SymbolButton(AppIcon.Replay, "后退15秒", storageReady && duration > 0) { seekPlayback(shownPosition.toLong() - 15000) }
                                 Column(Modifier.weight(1f)) {
-                                    Slider(modifier = Modifier.semantics { contentDescription = "播放进度"; stateDescription = "${position.toLong() / 60000}分${position.toLong() / 1000 % 60}秒，共${duration.toLong() / 60000}分钟" }, value = position.coerceIn(0f, duration.coerceAtLeast(1f)), onValueChange = { cancelPlaybackIntent(); controller?.seekTo(it.toLong()); position = it }, valueRange = 0f..duration.coerceAtLeast(1f), enabled = duration > 0f && controller?.isCommandAvailable(Player.COMMAND_SEEK_IN_CURRENT_MEDIA_ITEM) == true)
+                                    Slider(modifier = Modifier.semantics { contentDescription = "播放进度"; stateDescription = "${shownPosition.toLong() / 60000}分${shownPosition.toLong() / 1000 % 60}秒，共${if (duration > 0) "${duration.toLong() / 60000}分钟" else "时长未知"}" }, value = shownPosition.coerceIn(0f, duration.coerceAtLeast(1f)), onValueChange = { cancelPlaybackIntent(); draggingPosition = it }, onValueChangeFinished = { draggingPosition?.let { seekPlayback(it.toLong()) }; draggingPosition = null }, valueRange = 0f..duration.coerceAtLeast(1f), enabled = storageReady && duration > 0f && currentTrack != null)
                                     Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.SpaceBetween) {
-                                        Text("${position.toLong() / 60000}:${(position.toLong() / 1000 % 60).toString().padStart(2, '0')}", style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
-                                        Text("${duration.toLong() / 60000}:${(duration.toLong() / 1000 % 60).toString().padStart(2, '0')}", style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
+                                        Text("${shownPosition.toLong() / 60000}:${(shownPosition.toLong() / 1000 % 60).toString().padStart(2, '0')}", style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
+                                        Text(if (duration > 0) "${duration.toLong() / 60000}:${(duration.toLong() / 1000 % 60).toString().padStart(2, '0')}" else "--:--", style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
                                     }
                                 }
-                                SymbolButton(AppIcon.Forward, "前进30秒", controller?.isCommandAvailable(Player.COMMAND_SEEK_IN_CURRENT_MEDIA_ITEM) == true) { cancelPlaybackIntent(); controller?.seekTo(((controller?.currentPosition ?: 0L) + 30000).coerceAtMost(duration.toLong().coerceAtLeast(0))) }
+                                SymbolButton(AppIcon.Forward, "前进30秒", storageReady && duration > 0) { seekPlayback(shownPosition.toLong() + 30000) }
                             }
                             Spacer(Modifier.height(20.dp))
                             Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.SpaceBetween, verticalAlignment = Alignment.CenterVertically) {
