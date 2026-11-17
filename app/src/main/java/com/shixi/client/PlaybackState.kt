@@ -25,7 +25,7 @@ object PlaybackItems {
     fun mediaItem(track: Item): MediaItem = MediaItem.Builder().setMediaId("${track.id}:${track.albumId}:${track.page}")
         .setUri("shixi://track/${track.id}/${track.albumId}/${track.page}")
         .setMediaMetadata(androidx.media3.common.MediaMetadata.Builder().setTitle(track.title).setDisplayTitle(track.title)
-            .setSubtitle("拾昔").setArtist("").setAlbumArtist("").setArtworkUri(track.cover.takeIf { it.startsWith("https://") }?.let { android.net.Uri.parse(it) }).build()).build()
+            .setSubtitle("Ximalaya Lite").setArtist("").setAlbumArtist("").setArtworkUri(track.cover.takeIf { it.startsWith("https://") }?.let { android.net.Uri.parse(it) }).build()).build()
 
     fun item(media: MediaItem): Item? {
         val parts = media.mediaId.split(":")
