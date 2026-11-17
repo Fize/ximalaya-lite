@@ -42,6 +42,7 @@ enum class AppIcon(val path: String) {
     Home("M12 3 2 12h3v9h6v-6h2v6h6v-9h3z"),
     Discover("M12 2a10 10 0 1 0 0 20 10 10 0 0 0 0-20m0 2a8 8 0 1 1 0 16 8 8 0 0 1 0-16m5 3-3 7-7 3 3-7z"),
     Library("M3 3h5v18H3zm7 0h5v18h-5zm7 1 4-1 3 17-4 1z"),
+    Scan("M3 3h6v2H5v4H3zm12 0h6v6h-2V5h-4zM3 15h2v4h4v2H3zm16 0h2v6h-6v-2h4zM7 7h4v4H7zm6 0h4v4h-4zM7 13h4v4H7zm6 0h2v2h2v2h-4z"),
     Search("M10 2a8 8 0 1 0 0 16 8 8 0 0 0 0-16m0 2a6 6 0 1 1 0 12 6 6 0 0 1 0-12m6 11 7 7-1.5 1.5-7-7z"),
     Settings("M10 2h4l.7 3 2 .9 2.8-.9 2 3.5-2.1 2.2v2.6l2.1 2.2-2 3.5-2.8-.9-2 .9L14 22h-4l-.7-3-2-.9-2.8.9-2-3.5 2.1-2.2v-2.6L2.5 8.5 4.5 5l2.8.9 2-.9zM12 8a4 4 0 1 0 0 8 4 4 0 0 0 0-8"),
     Play("M8 4v16l12-8z"), Pause("M5 4h5v16H5zm9 0h5v16h-5z"),
@@ -95,10 +96,11 @@ enum class AppIcon(val path: String) {
         supporting?.let { Text(it, style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant) }
     }
 }
-@Composable fun PageHeading(title: String, onSettings: (() -> Unit)? = null, onSearch: (() -> Unit)? = null) {
+@Composable fun PageHeading(title: String, onSettings: (() -> Unit)? = null, onSearch: (() -> Unit)? = null, onScan: (() -> Unit)? = null) {
     Row(Modifier.fillMaxWidth().heightIn(min = 64.dp), verticalAlignment = Alignment.CenterVertically) {
         Text(title, Modifier.weight(1f).semantics { heading() }, style = MaterialTheme.typography.headlineLarge)
         onSearch?.let { SymbolButton(AppIcon.Search, "搜索专辑", onClick = it) }
+        onScan?.let { SymbolButton(AppIcon.Scan, "扫一扫", onClick = it) }
         onSettings?.let { SymbolButton(AppIcon.Settings, "设置", onClick = it) }
     }
 }
@@ -267,12 +269,12 @@ fun syncViewText(cloud: CloudState): String = when (syncViewState(cloud)) {
     onSettings: () -> Unit, onAccount: () -> Unit, onQueue: () -> Unit, onSync: () -> Unit,
     onAlbum: (Item) -> Unit, onToggle: (CloudSubscriptionRow) -> Unit, onHistory: (HistoryRow) -> Unit,
     onCloudHistory: (CloudHistoryRow) -> Unit, pendingId: Long? = null, currentId: Long? = null, playing: Boolean = false,
-    onDiscover: () -> Unit = {}, initialFilter: String = "订阅", onFilterChanged: (String) -> Unit = {}, onCurrentPlayback: () -> Unit = {}) {
+    onDiscover: () -> Unit = {}, initialFilter: String = "订阅", onFilterChanged: (String) -> Unit = {}, onCurrentPlayback: () -> Unit = {}, onScan: (() -> Unit)? = null) {
     val filter = initialFilter
     val scroll = rememberLazyListState()
     RefreshContent(cloudVisible && cloud.busy, onSync, Modifier.fillMaxSize()) {
     LazyColumn(state = scroll, contentPadding = PaddingValues(bottom = 24.dp)) {
-        item { PageHeading("我的", onSettings); Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+        item { PageHeading("我的", onSettings, onScan = onScan); Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
             listOf("订阅", "历史").forEach { value -> FilterChip(filter == value, onClick = { onFilterChanged(value) }, label = { Text(value) }, border = null, colors = FilterChipDefaults.filterChipColors(containerColor = MaterialTheme.colorScheme.surfaceContainer, selectedContainerColor = MaterialTheme.colorScheme.primaryContainer, selectedLabelColor = MaterialTheme.colorScheme.primary)) }
         } }
         if (filter == "订阅") {

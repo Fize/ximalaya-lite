@@ -540,7 +540,7 @@ class MainActivity : ComponentActivity() {
                                 1 -> DiscoveryScreen(discovery, ::openSearch) { openAlbum(it) }
                                 2 -> LibraryScreen(local, cloudState, cloudVisible, ::openSettings, ::openAccount, { sheet = "queue" }, { refreshLibrary() }, { openAlbum(it) },
                                     { cloudSync.toggle(it.item(), it.owner) }, { selectTrack(it.item()) },
-                                    { playCloudHistory(it) }, pendingTrackId, currentTrack?.id, controller?.playWhenReady == true, { switchTab(1) }, libraryFilter, { libraryFilter = it }, ::togglePlayback)
+                                    { playCloudHistory(it) }, pendingTrackId, currentTrack?.id, controller?.playWhenReady == true, { switchTab(1) }, libraryFilter, { libraryFilter = it }, ::togglePlayback, onScan = { startActivity(android.content.Intent(this@MainActivity, WebLoginActivity::class.java)) })
 
                             }
                         }
