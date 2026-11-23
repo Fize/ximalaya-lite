@@ -269,10 +269,20 @@ fun syncViewText(cloud: CloudState): String = when (syncViewState(cloud)) {
     onSettings: () -> Unit, onAccount: () -> Unit, onQueue: () -> Unit, onSync: () -> Unit,
     onAlbum: (Item) -> Unit, onToggle: (CloudSubscriptionRow) -> Unit, onHistory: (HistoryRow) -> Unit,
     onCloudHistory: (CloudHistoryRow) -> Unit, pendingId: Long? = null, currentId: Long? = null, playing: Boolean = false,
-    onDiscover: () -> Unit = {}, initialFilter: String = "订阅", onFilterChanged: (String) -> Unit = {}, onCurrentPlayback: () -> Unit = {}, onScan: (() -> Unit)? = null) {
+    onDiscover: () -> Unit = {}, initialFilter: String = "订阅", onFilterChanged: (String) -> Unit = {}, onCurrentPlayback: () -> Unit = {}, onScan: (() -> Unit)? = null,
+    onHistoryMore: () -> Unit = {}) {
     val filter = initialFilter
     val scroll = rememberLazyListState()
-    RefreshContent(cloudVisible && cloud.busy, onSync, Modifier.fillMaxSize()) {
+    LaunchedEffect(scroll, filter, cloudVisible, cloud.historyMore, cloud.historyLoading) {
+        if (filter != "历史") return@LaunchedEffect
+        snapshotFlow {
+            val layout = scroll.layoutInfo
+            val last = layout.visibleItemsInfo.lastOrNull()?.index ?: -1
+            scroll.isScrollInProgress && cloudVisible && cloud.historyMore && !cloud.historyLoading &&
+                last >= layout.totalItemsCount - 3
+        }.collect { nearEnd -> if (nearEnd) onHistoryMore() }
+    }
+    RefreshContent(cloudVisible && cloud.refreshing, onSync, Modifier.fillMaxSize()) {
     LazyColumn(state = scroll, contentPadding = PaddingValues(bottom = 24.dp)) {
         item { PageHeading("我的", onSettings, onScan = onScan); Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
             listOf("订阅", "历史").forEach { value -> FilterChip(filter == value, onClick = { onFilterChanged(value) }, label = { Text(value) }, border = null, colors = FilterChipDefaults.filterChipColors(containerColor = MaterialTheme.colorScheme.surfaceContainer, selectedContainerColor = MaterialTheme.colorScheme.primaryContainer, selectedLabelColor = MaterialTheme.colorScheme.primary)) }
@@ -295,6 +305,11 @@ fun syncViewText(cloud: CloudState): String = when (syncViewState(cloud)) {
                 val remoteRow = remoteRows.firstOrNull { it.id == id }
                 if (row != null) ListeningRow(row.title, if (row.completed) "已听完" else "听到 ${row.positionMs / 60000} 分钟", pendingId == id, playing && currentId == id, { onHistory(row) })
                 else if (remoteRow != null) ListeningRow(remoteRow.title, "听到 ${remoteRow.positionMs / 60000} 分钟", pendingId == id, playing && currentId == id, { if (currentId == id && playing) onCurrentPlayback() else onCloudHistory(remoteRow) })
+            }
+            if (cloudVisible && cloud.historyLoading) item(key = "history-footer") {
+                Box(Modifier.fillMaxWidth().heightIn(min = 48.dp), contentAlignment = Alignment.Center) {
+                    CircularProgressIndicator(Modifier.size(20.dp), strokeWidth = 2.dp)
+                }
             }
         }
     } }
@@ -353,7 +368,7 @@ fun speedText(speed: Float): String = java.math.BigDecimal.valueOf(speed.toDoubl
     cloud: CloudState = CloudState(), cloudVisible: Boolean = false, onSync: () -> Unit = {}, sleep: String = "关闭") {
     if (cacheMessage.isNotEmpty()) FloatingNotice(cacheMessage)
     val accountLabel = accountStatusText(account)
-    RefreshContent(cloudVisible && cloud.busy, onSync, Modifier.fillMaxSize()) {
+    RefreshContent(cloudVisible && cloud.refreshing, onSync, Modifier.fillMaxSize()) {
         LazyColumn(contentPadding = PaddingValues(bottom = 24.dp), verticalArrangement = Arrangement.spacedBy(24.dp)) {
             item { Row(verticalAlignment = Alignment.CenterVertically) { SymbolButton(AppIcon.Back, "返回", onClick = onBack); Text("设置", style = MaterialTheme.typography.headlineLarge) } }
             item { SettingsGroup("账号") {

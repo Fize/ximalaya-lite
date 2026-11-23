@@ -317,7 +317,6 @@ class MainActivity : ComponentActivity() {
                         return
                     }
                     val ticket = ++playbackIntentGeneration
-                    val identity = accountManager.contentIdentity()
                     val destination = stack.toList(); val destinationTab = tab
                     checkingAccess = true; pendingTrackId = entry.id
                     scope.launch {
@@ -327,6 +326,7 @@ class MainActivity : ComponentActivity() {
                             val ready = withTimeoutOrNull(10_000) { snapshotFlow { storageReady && controller != null }.first { it } }
                             if (ticket != playbackIntentGeneration || tab != destinationTab || (stack.toList() != destination && stack.toList() != destination + "player-$destinationTab")) return@launch
                             if (ready != true) throw java.io.IOException("播放器暂未就绪")
+                            val identity = accountManager.contentIdentity()
                             val checked = withContext(Dispatchers.IO) { val fresh = if (entry.access == com.shixi.protocol.ListeningAccess.UNKNOWN) content.tracks(entry.albumId, entry.page).firstOrNull { it.id == entry.id } ?: content.locateTrack(entry.albumId, entry.id) else entry; content.resolve(fresh); fresh }
                             if (ticket != playbackIntentGeneration || tab != destinationTab || (stack.toList() != destination && stack.toList() != destination + "player-$destinationTab")) return@launch
                             if (accountManager.contentIdentity() != identity) throw com.shixi.protocol.ContentAccessException(com.shixi.protocol.ListeningAccess.UNKNOWN, "账号会话已改变，请重新选择节目")
@@ -471,13 +471,13 @@ class MainActivity : ComponentActivity() {
                 }) { padding ->
                     pageState.SaveableStateProvider("tab-$tab") {
                     androidx.compose.runtime.key(tab) {
-                    NavDisplay(backStack = stack, onBack = { navigateBack() }, entryProvider = { key -> NavEntry(key, metadata = if (key == "player-$tab") {
-                        // Collapse atomically with the bottom bar, avoiding a sliding page whose
-                        // available height changes halfway through the navigation transition.
-                        NavDisplay.transitionSpec { EnterTransition.None togetherWith ExitTransition.None } +
-                            NavDisplay.popTransitionSpec { EnterTransition.None togetherWith ExitTransition.None } +
-                            NavDisplay.predictivePopTransitionSpec { EnterTransition.None togetherWith ExitTransition.None }
-                    } else emptyMap()) {
+                    NavDisplay(backStack = stack, onBack = { navigateBack() },
+                        // All destinations switch atomically with their surrounding bars. A partial
+                        // slide would resize the page while the player bar changes height.
+                        transitionSpec = { EnterTransition.None togetherWith ExitTransition.None },
+                        popTransitionSpec = { EnterTransition.None togetherWith ExitTransition.None },
+                        predictivePopTransitionSpec = { EnterTransition.None togetherWith ExitTransition.None },
+                        entryProvider = { key -> NavEntry(key) {
                     Surface(modifier = Modifier.fillMaxSize(), color = MaterialTheme.colorScheme.background) {
                     if (key == "player-$tab") {
                         var draggingPosition by remember(currentTrack?.id, currentTrack?.albumId) { mutableStateOf<Float?>(null) }
@@ -608,12 +608,14 @@ class MainActivity : ComponentActivity() {
                                         openPlayer()
                                     },
                                     { selectTrack(it.item()) }, { openAlbum(it) }, { libraryFilter = "订阅"; switchTab(2) }, { switchTab(1) }, ::openSettings, ::openSearch, controller?.playWhenReady == true, pendingTrackId, { if (live) togglePlayback() else recent?.let { playTrack(it.item()) } },
-                                    if (cloudVisible) cloudState.subscriptions.filter { it.subscribed }.map { it.item() } else emptyList(), cloudVisible && cloudState.busy, { refreshLibrary() }, { moreTrack = it.item(); sheet = "more" }, { libraryFilter = "历史"; switchTab(2) })
+                                    if (cloudVisible) cloudState.subscriptions.filter { it.subscribed }.map { it.item() } else emptyList(), cloudVisible && cloudState.refreshing, { refreshLibrary() }, { moreTrack = it.item(); sheet = "more" }, { libraryFilter = "历史"; switchTab(2) })
                                 }
                                 1 -> DiscoveryScreen(discovery, ::openSearch) { openAlbum(it) }
                                 2 -> LibraryScreen(effectiveLocal, cloudState, cloudVisible, ::openSettings, ::openAccount, { sheet = "queue" }, { refreshLibrary() }, { openAlbum(it) },
                                     { cloudSync.toggle(it.item(), it.owner) }, { selectTrack(it.item()) },
-                                    { playCloudHistory(it) }, pendingTrackId, currentTrack?.id, controller?.playWhenReady == true, { switchTab(1) }, libraryFilter, { libraryFilter = it }, ::togglePlayback, onScan = { startActivity(android.content.Intent(this@MainActivity, WebLoginActivity::class.java)) })
+                                    { playCloudHistory(it) }, pendingTrackId, currentTrack?.id, controller?.playWhenReady == true, { switchTab(1) }, libraryFilter, { libraryFilter = it }, ::togglePlayback,
+                                    onScan = { startActivity(android.content.Intent(this@MainActivity, WebLoginActivity::class.java)) },
+                                    onHistoryMore = { cloudSync.loadMoreHistory() })
 
                             }
                         }

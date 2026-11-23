@@ -10,7 +10,8 @@ import kotlinx.coroutines.flow.asStateFlow
 /** Account records stay isolated; the first verified account receives the guest history batch. */
 data class CloudState(val owner: String = "", val history: List<CloudHistoryRow> = emptyList(),
     val subscriptions: List<CloudSubscriptionRow> = emptyList(), val pending: Int = 0,
-    val busy: Boolean = false, val message: String = "登录后可同步账号历史和订阅", val problem: SyncProblem? = null)
+    val busy: Boolean = false, val message: String = "登录后可同步账号历史和订阅", val problem: SyncProblem? = null,
+    val refreshing: Boolean = false, val historyMore: Boolean = false, val historyLoading: Boolean = false)
 
 class CloudSync internal constructor(private val account: AccountManager, private val dao: CloudDao,
     private val gateway: CloudGateway, private val scope: CoroutineScope = CoroutineScope(SupervisorJob() + Dispatchers.IO),
@@ -24,6 +25,9 @@ class CloudSync internal constructor(private val account: AccountManager, privat
     private var retry: Job? = null
     private var revision = clock()
     private var readAttempts = 0
+    private var historyPage = 0
+    private var historyMore = false
+    private var historyLoading = false
     private val requested = java.util.concurrent.atomic.AtomicBoolean(false)
     init {
         scope.launch { for (task in work) try { task() } catch (cancelled: CancellationException) { throw cancelled }
@@ -35,7 +39,7 @@ class CloudSync internal constructor(private val account: AccountManager, privat
             observed = lease
             // Hide the previous account immediately, before queued I/O or network completes.
             if (mutable.value.owner != lease?.owner.orEmpty()) mutable.value = CloudState(owner = lease?.owner.orEmpty())
-            retry?.cancel(); readAttempts = 0
+            retry?.cancel(); readAttempts = 0; historyPage = 0; historyMore = false; historyLoading = false
             if (lease != null) submit { if (account.current(lease)) { refresh(lease); synchronize(lease, false) } }
         } }
     }
@@ -43,8 +47,9 @@ class CloudSync internal constructor(private val account: AccountManager, privat
     private fun nextRevision(): Long { revision = maxOf(revision + 1, clock()); return revision }
     private suspend fun refresh(lease: AccountLease, message: String? = null, problem: SyncProblem? = null) {
         val histories = dao.history(lease.owner); val subs = dao.subscriptions(lease.owner); val pending = dao.pending(lease.owner)
-        if (account.current(lease)) mutable.value = CloudState(lease.owner, histories, subs, pending.size, false,
-            message ?: if (pending.isEmpty()) "账号记录已读取，尚未核对服务器" else "${pending.size}项待同步；离线修改尚未由服务器确认", problem)
+        if (account.current(lease)) mutable.value = mutable.value.copy(owner = lease.owner, history = histories, subscriptions = subs,
+            pending = pending.size, message = message ?: if (pending.isEmpty()) "账号记录已读取，尚未核对服务器" else "${pending.size}项待同步；离线修改尚未由服务器确认",
+            problem = problem, historyMore = historyMore, historyLoading = historyLoading)
     }
     fun sync() = requestSync(true)
     fun resume() = requestSync(false)
@@ -74,27 +79,77 @@ class CloudSync internal constructor(private val account: AccountManager, privat
                 row.positionMs, row.durationMs, row.completed, row.updatedAt), nextRevision())
             refresh(lease)
             val pending = dao.pending(lease.owner).firstOrNull { it.kind == "history" && it.id == row.id } ?: return@let
-            if (pending.attempts < 5 && pending.nextAt != Long.MAX_VALUE) schedule(lease, maxOf(5_000, pending.nextAt - clock()))
+            // Keep one cadence instead of postponing the upload on every ten-second heartbeat.
+            if (retry?.isActive != true && pending.attempts < 5 && pending.nextAt != Long.MAX_VALUE)
+                schedule(lease, maxOf(30_000, pending.nextAt - clock()))
         } }
     }
     private fun schedule(lease: AccountLease, delayMs: Long) {
         retry?.cancel(); retry = scope.launch { delay(delayMs.coerceAtLeast(1_000)); submit { synchronize(lease, false) } }
     }
+    fun loadMoreHistory() {
+        val lease = account.lease() ?: return
+        if (historyLoading || !historyMore) return
+        historyLoading = true
+        mutable.value = mutable.value.copy(historyLoading = true)
+        submit {
+            try {
+                if (!account.current(lease) || !historyMore) return@submit
+                val page = historyPage + 1
+                val result = gateway.readPage(lease, page)
+                if (!account.current(lease)) return@submit
+                if (result.snapshot.history.isNotEmpty()) dao.mergeHistory(lease.owner, result.snapshot.history)
+                historyPage = page
+                historyMore = result.hasMore
+                refresh(lease)
+            } catch (cancelled: CancellationException) { throw cancelled }
+            catch (error: Exception) {
+                if (account.current(lease)) mutable.value = mutable.value.copy(message = "历史加载失败，请重试",
+                    problem = SyncProblem.from("历史读取", error))
+            } finally {
+                historyLoading = false
+                if (account.current(lease)) mutable.value = mutable.value.copy(historyLoading = false)
+            }
+        }
+    }
     private fun confirmed(op: SyncRow, remote: CloudSnapshot, history: CloudHistoryRow?, sub: CloudSubscriptionRow?): Boolean =
         if (op.kind == "subscription") remote.subscriptionFailure == null && remote.subscriptions.any { it.id == op.id } == sub?.subscribed
         else remote.historyFailure == null && history != null && remote.history.any { it.albumId == history.albumId && it.serverAt > 0 && it.serverAt >= history.localAt }
 
-    private suspend fun readRemote(lease: AccountLease): CloudSnapshot = gateway.readIndependent(lease) { histories ->
-        if (account.current(lease)) {
-            dao.mergeHistory(lease.owner, histories)
-            refresh(lease)
-            if (account.current(lease)) mutable.value = mutable.value.copy(busy = true)
+    /** One page is enough for the normal path. A bounded scan only covers a previously attempted write. */
+    private suspend fun readRemote(lease: AccountLease, needed: Set<Long> = emptySet()): CloudSnapshot {
+        val history = mutableListOf<CloudHistoryRow>()
+        var subscriptions: List<CloudSubscriptionRow> = emptyList()
+        var historyFailure: Exception? = null
+        var subscriptionFailure: Exception? = null
+        var page = 0
+        var more = true
+        val limit = if (needed.isEmpty()) 1 else 5
+        while (more && page < limit) {
+            val result = gateway.readPage(lease, page + 1)
+            page++
+            if (page == 1) {
+                subscriptions = result.snapshot.subscriptions
+                historyFailure = result.snapshot.historyFailure
+                subscriptionFailure = result.snapshot.subscriptionFailure
+            }
+            if (account.current(lease)) {
+                if (result.snapshot.history.isNotEmpty()) dao.mergeHistory(lease.owner, result.snapshot.history)
+                history.addAll(result.snapshot.history)
+                historyPage = maxOf(historyPage, page)
+                historyMore = result.hasMore
+                refresh(lease)
+                if (account.current(lease)) mutable.value = mutable.value.copy(busy = true)
+            }
+            more = result.hasMore && historyFailure == null && needed.isNotEmpty() &&
+                needed.any { id -> history.none { it.id == id } }
         }
+        return CloudSnapshot(history, subscriptions, historyFailure, subscriptionFailure)
     }
 
     private suspend fun synchronize(lease: AccountLease, manual: Boolean) {
         if (!account.current(lease)) return
-        retry?.cancel(); mutable.value = mutable.value.copy(busy = true, message = "正在核对服务器…")
+        retry?.cancel(); mutable.value = mutable.value.copy(busy = true, refreshing = manual, message = "正在核对服务器…")
         var stage = "本机记录合并"
         var affectedKind: String? = null
         try {
@@ -112,7 +167,9 @@ class CloudSync internal constructor(private val account: AccountManager, privat
             if (!account.current(lease)) return
             // Query before every resend: a previous timeout may have happened after acceptance.
             stage = "账号记录读取"
-            var remote = readRemote(lease)
+            // Rows that were never sent need no lookup; only an ambiguous previous attempt does.
+            val needed = dao.pending(lease.owner).filter { it.kind == "history" && it.attempts > 0 }.map { it.id }.toSet()
+            var remote = readRemote(lease, needed)
             if (!account.current(lease)) return
             dao.reconcile(lease.owner, remote)
             val histories = dao.history(lease.owner).associateBy { it.id }
@@ -142,7 +199,7 @@ class CloudSync internal constructor(private val account: AccountManager, privat
                 if (!account.current(lease)) return
                 stage = "同步结果确认"
                 affectedKind = null
-                remote = readRemote(lease)
+                remote = readRemote(lease, sent.filter { it.kind == "history" }.map { it.id }.toSet())
                 if (!account.current(lease)) return
                 val sentAlbums = sent.filter { it.kind == "history" }.mapNotNull { histories[it.id]?.albumId }.toSet()
                 for (op in pending) {
@@ -182,7 +239,7 @@ class CloudSync internal constructor(private val account: AccountManager, privat
                     if (readAttempts < 5) schedule(lease, retryDelay(readAttempts))
                 }
             }
-        } finally { if (account.current(lease)) mutable.value = mutable.value.copy(busy = false) }
+        } finally { if (account.current(lease)) mutable.value = mutable.value.copy(busy = false, refreshing = false) }
     }
     suspend fun awaitIdle() { val done = CompletableDeferred<Unit>(); submit { done.complete(Unit) }; done.await() }
     fun close() { scope.cancel() }

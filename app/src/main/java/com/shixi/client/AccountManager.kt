@@ -109,7 +109,8 @@ class AccountManager(private val gateway: AccountGateway, private val store: Ses
         }
     }
 
-    fun contentIdentity(): Any = synchronized(guard) { generation to session?.takeIf { mutable.value.signedIn } }
+    /** Credential identity, independent of whether a re-verification is currently in flight. */
+    fun contentIdentity(): Any = synchronized(guard) { generation to session }
     fun lease(): AccountLease? = synchronized(guard) { session?.takeIf { mutable.value.signedIn }?.let { AccountLease(generation, it, playbackLineage) } }
     fun current(lease: AccountLease): Boolean = synchronized(guard) { generation == lease.generation && session === lease.session && mutable.value.signedIn }
     /** Only verified refresh preserves this lineage. Network calls still require exact session identity. */

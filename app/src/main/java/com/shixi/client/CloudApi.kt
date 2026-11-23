@@ -14,9 +14,13 @@ import java.util.concurrent.TimeUnit
 
 data class CloudSnapshot(val history: List<CloudHistoryRow>, val subscriptions: List<CloudSubscriptionRow>,
     val historyFailure: Exception? = null, val subscriptionFailure: Exception? = null)
+data class CloudPage(val snapshot: CloudSnapshot, val hasMore: Boolean)
 class CloudFailure(val expired: Boolean = false, message: String, val retryable: Boolean = false) : IOException(message)
 interface CloudGateway {
     fun read(lease: AccountLease): CloudSnapshot
+    /** Page one carries subscriptions as well; later pages only extend the history window. */
+    fun readPage(lease: AccountLease, page: Int): CloudPage =
+        if (page <= 1) CloudPage(read(lease), false) else CloudPage(CloudSnapshot(emptyList(), emptyList()), false)
     suspend fun readIndependent(lease: AccountLease, historyReady: suspend (List<CloudHistoryRow>) -> Unit): CloudSnapshot =
         read(lease).also { if (it.historyFailure == null) historyReady(it.history) }
     fun subscription(lease: AccountLease, row: CloudSubscriptionRow)
@@ -63,6 +67,20 @@ class CloudApi internal constructor(private val context: Context, private val ht
         }
     }
     override fun read(lease: AccountLease) = CloudSnapshot(readHistory(lease), readSubscriptions(lease))
+    override fun readPage(lease: AccountLease, page: Int): CloudPage {
+        require(page > 0)
+        if (page > 1) return readHistoryPage(lease, page).let { CloudPage(CloudSnapshot(it.first, emptyList()), it.second) }
+        var historyFailure: Exception? = null
+        var subscriptionFailure: Exception? = null
+        var more = false
+        val history = try { readHistoryPage(lease, 1).also { more = it.second }.first }
+            catch (cancelled: kotlinx.coroutines.CancellationException) { throw cancelled }
+            catch (error: Exception) { if (error is CloudFailure && error.expired) throw error; historyFailure = error; emptyList() }
+        val subscriptions = try { readSubscriptions(lease) }
+            catch (cancelled: kotlinx.coroutines.CancellationException) { throw cancelled }
+            catch (error: Exception) { if (error is CloudFailure && error.expired) throw error; subscriptionFailure = error; emptyList() }
+        return CloudPage(CloudSnapshot(history, subscriptions, historyFailure, subscriptionFailure), more)
+    }
     override suspend fun readIndependent(lease: AccountLease, historyReady: suspend (List<CloudHistoryRow>) -> Unit): CloudSnapshot {
         var historyFailure: Exception? = null
         var subscriptionFailure: Exception? = null
@@ -75,10 +93,19 @@ class CloudApi internal constructor(private val context: Context, private val ht
         return CloudSnapshot(history, subscriptions, historyFailure, subscriptionFailure)
     }
     private fun readHistory(lease: AccountLease): List<CloudHistoryRow> {
-        val owner = lease.owner; val history = mutableListOf<CloudHistoryRow>()
-        try {
+        val history = mutableListOf<CloudHistoryRow>()
         var page = 1
         while (true) {
+            val result = readHistoryPage(lease, page)
+            history.addAll(result.first)
+            if (!result.second) break
+            if (++page > 100) throw CloudFailure(message = "历史超过本次同步范围，未覆盖本机数据，请稍后重试")
+        }
+        return history.groupBy { it.id }.values.map { rows -> rows.maxBy { it.serverAt } }
+    }
+    private fun readHistoryPage(lease: AccountLease, page: Int): Pair<List<CloudHistoryRow>, Boolean> {
+        val owner = lease.owner; val history = mutableListOf<CloudHistoryRow>()
+        try {
             val result = request(lease, "nyx/v1/history/query/android", mapOf("uid" to lease.session.uid.toString(), "pageId" to page.toString(), "pageSize" to "20", "timeStamp" to System.currentTimeMillis().toString()))
             // The original client reads data via optString + Gson: both object and
             // JSON-encoded object are valid. Keep the list mandatory, so malformed
@@ -98,10 +125,7 @@ class CloudApi internal constructor(private val context: Context, private val ht
                 val duration = row.optLong("length").coerceAtLeast(0) * 1000
                 history.add(CloudHistoryRow(owner, id, album, row.optString("childTitle").take(1000), safeCover(row.optString("itemCoverUrl")), position, duration, duration > 0 && position >= duration, 0, at))
             }
-            if (list.length() < 20) break
-            if (++page > 100) throw CloudFailure(message = "历史超过本次同步范围，未覆盖本机数据，请稍后重试")
-        }
-        return history.groupBy { it.id }.values.map { rows -> rows.maxBy { it.serverAt } }
+            return history.groupBy { it.id }.values.map { rows -> rows.maxBy { it.serverAt } } to (list.length() >= 20)
         } catch (error: kotlinx.coroutines.CancellationException) { throw error }
         catch (error: CloudFailure) { throw error }
         catch (error: Exception) { throw CloudReadFailure("历史读取", error) }
