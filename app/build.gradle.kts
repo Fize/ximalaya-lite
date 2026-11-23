@@ -1,6 +1,6 @@
 plugins { id("com.android.application"); id("org.jetbrains.kotlin.plugin.compose"); id("com.google.devtools.ksp") }
 android { namespace = "com.shixi.client"; compileSdk = 37
-    defaultConfig { applicationId = "com.shixi.client"; minSdk = 26; targetSdk = 37; versionCode = 1; versionName = "0.1.0"; ndk { abiFilters += "arm64-v8a" }; testInstrumentationRunner = providers.gradleProperty("shixi.testRunner").getOrElse("com.shixi.client.AccountVerification") }
+    defaultConfig { applicationId = "com.shixi.client"; minSdk = 26; targetSdk = 37; versionCode = 2; versionName = "0.1.1"; ndk { abiFilters += "arm64-v8a" }; testInstrumentationRunner = providers.gradleProperty("shixi.testRunner").getOrElse("com.shixi.client.AccountVerification") }
     // Distribution signing is explicit; never silently fall back to a debug key.
     val signingNames = listOf("SHIXI_RELEASE_STORE_FILE", "SHIXI_RELEASE_STORE_PASSWORD", "SHIXI_RELEASE_KEY_ALIAS", "SHIXI_RELEASE_KEY_PASSWORD")
     val signingValues = signingNames.map { providers.environmentVariable(it).orNull }
