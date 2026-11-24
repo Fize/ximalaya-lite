@@ -35,7 +35,8 @@ class PlaybackResolver(private val tracks: (Long, Int) -> List<Item>, private va
         StartupTiming.mark("authorization_done")
         if (result.scheme != "https" || result.host.isNullOrBlank()) throw IOException("未取得安全的播放地址")
         synchronized(this) {
-            if (generation != current || owner() != identity) throw com.shixi.protocol.ContentAccessException(com.shixi.protocol.ListeningAccess.UNKNOWN, "账号会话已改变，请重新选择节目")
+            if (generation != current || owner() != identity)
+                throw com.shixi.protocol.ContentAccessException(com.shixi.protocol.ListeningAccess.UNKNOWN, "账号会话已改变，请重新选择节目", sessionChanged = true)
             if (generation == current) {
                 if (cache.size >= 8) cache.remove(cache.keys.first())
                 cache[key] = Cached(result, clock() + 120_000, identity)

@@ -38,13 +38,13 @@ jobs:
           trap 'rm -f "$keyfile"' EXIT
           printf '%s' "$KEYSTORE_BASE64" | base64 --decode > "$keyfile"
           mkdir -p dist
-          "$ANDROID_HOME/build-tools/36.0.0/apksigner" sign --ks "$keyfile" --ks-key-alias "$KEY_ALIAS" --ks-pass env:STORE_PASSWORD --key-pass env:KEY_PASSWORD --out dist/ximalaya-lite-0.1.1.apk app/build/outputs/apk/release/app-release-unsigned.apk
-          "$ANDROID_HOME/build-tools/36.0.0/apksigner" verify --verbose --print-certs dist/ximalaya-lite-0.1.1.apk
+          "$ANDROID_HOME/build-tools/36.0.0/apksigner" sign --ks "$keyfile" --ks-key-alias "$KEY_ALIAS" --ks-pass env:STORE_PASSWORD --key-pass env:KEY_PASSWORD --out dist/ximalaya-lite-0.1.2.apk app/build/outputs/apk/release/app-release-unsigned.apk
+          "$ANDROID_HOME/build-tools/36.0.0/apksigner" verify --verbose --print-certs dist/ximalaya-lite-0.1.2.apk
           cd dist
-          sha256sum ximalaya-lite-0.1.1.apk > SHA256SUMS
+          sha256sum ximalaya-lite-0.1.2.apk > SHA256SUMS
       - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         with:
-          name: ximalaya-lite-0.1.1
+          name: ximalaya-lite-0.1.2
           path: |
             dist/*.apk
             dist/SHA256SUMS

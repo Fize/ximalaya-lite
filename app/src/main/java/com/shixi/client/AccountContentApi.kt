@@ -7,6 +7,7 @@ import com.shixi.protocol.ContentApi
 import com.shixi.protocol.Item
 import com.shixi.protocol.ListeningAccess
 import okhttp3.OkHttpClient
+import java.net.URLEncoder
 import java.util.UUID
 import java.util.concurrent.TimeUnit
 
@@ -21,11 +22,20 @@ class AccountContentApi(private val context: Context,
     private val device = context.getSharedPreferences("account-device", Context.MODE_PRIVATE).let {
         it.getString("id", null) ?: UUID.randomUUID().toString().also { id -> check(it.edit().putString("id", id).commit()) }
     }
+    private val userAgent = "ting_9.4.74.3(${URLEncoder.encode(Build.MODEL, "UTF-8")},Android${Build.VERSION.SDK_INT})"
+    private fun cookie(lease: AccountLease?): String = buildString {
+        append("1&_device=android&").append(device).append("&9.4.74.3;")
+        append("channel=shixi;impl=").append(context.packageName).append(";osversion=").append(Build.VERSION.SDK_INT).append(';')
+        if (lease != null) append("1&_token=").append(lease.session.uid).append('&').append(lease.session.token).append(';')
+    }
     private fun <T> operation(authenticated: Boolean = true, block: (ContentApi) -> T): T {
         val deadline = System.nanoTime() + TimeUnit.MILLISECONDS.toNanos(client.callTimeoutMillis.toLong().takeIf { it > 0 } ?: 20_000L)
         val identity = accounts.contentIdentity()
         val lease = accounts.lease()
-        fun checkOwner() { if (accounts.contentIdentity() != identity || lease != null && !accounts.current(lease)) throw ContentAccessException(ListeningAccess.UNKNOWN, "账号会话已改变，请重新选择节目") }
+        fun checkOwner() {
+            if (accounts.contentIdentity() != identity || lease != null && !accounts.current(lease))
+                throw ContentAccessException(ListeningAccess.UNKNOWN, "账号会话已改变，请重新选择节目", sessionChanged = true)
+        }
         checkOwner()
         // Recheck before every actual exchange, including a recovered connection.
         // Derived clients share the original pool; the total call timeout is unchanged.
@@ -58,12 +68,14 @@ class AccountContentApi(private val context: Context,
                 url.host == "mpay.ximalaya.com" && request.method == "GET" &&
                     path.matches(Regex("/mobile/track/pay/v2/[1-9][0-9]*/ts-[0-9]+")) && url.query == "device=android"))
             val builder = request.newBuilder().removeHeader("Cookie").removeHeader("Cookie2")
-            if (authenticated && lease != null) {
-                val token = lease.session.token
-                require(lease.session.uid > 0 && token.matches(Regex("[A-Za-z0-9._~+/%=-]{1,4096}")))
-                builder.header("Cookie", "1&_device=android&$device&9.4.74.3;impl=${context.packageName};osversion=${Build.VERSION.SDK_INT};1&_token=${lease.session.uid}&$token;")
-                    .header("Cookie2", "\$version=1")
+            val activeLease = lease.takeIf { authenticated }
+            activeLease?.let {
+                require(it.session.uid > 0 && it.session.token.matches(Regex("[A-Za-z0-9._~+/%=-]{1,4096}")))
             }
+            builder.header("Cookie", cookie(activeLease))
+                .header("Cookie2", "\$version=1")
+                .header("Accept", "*/*")
+                .header("User-Agent", userAgent)
             checkOwner()
             // Several metadata/redirect calls form one user operation, not separate
             // full timeout budgets that could leave a tap waiting for minutes.

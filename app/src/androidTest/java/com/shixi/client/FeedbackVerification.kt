@@ -41,7 +41,8 @@ class FeedbackVerification : Instrumentation() {
             for(m in listOf("denied","wrong","sample")){mode=m;check(runCatching{fixture.resolve(item)}.isFailure)}
             mode="login";val before=fallbackCalls;check(runCatching{fixture.resolve(item)}.isFailure);check(fallbackCalls==before)
             for (code in listOf(50,401,403)) check(userContentMessage(ContentAccessException(ListeningAccess.UNKNOWN, serviceCode=code)) == "登录状态需要更新，请重试")
-            check(userContentMessage(ContentAccessException(ListeningAccess.UNKNOWN)) == "账号状态已变化，请重新选择节目")
+            check(userContentMessage(ContentAccessException(ListeningAccess.UNKNOWN)) == "暂时无法确认本集权限，请重试")
+            check(userContentMessage(ContentAccessException(ListeningAccess.UNKNOWN, sessionChanged=true)) == "账号状态已变化，请重新选择节目")
             checks.add("known login failures retain account recovery instead of reselecting episode")
             checks.add("924 fallback requires fresh exact grant; denied/wrong/sample/login rejected")
             val live=AccountContentApi(targetContext)

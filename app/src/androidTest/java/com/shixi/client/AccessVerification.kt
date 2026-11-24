@@ -28,6 +28,8 @@ class AccessVerification : Instrumentation() {
             fun state(json: String) = EpisodeAccess.classify(JSONObject(json))
             check(state("{}") == ListeningAccess.UNKNOWN)
             check(state("{isPaid:false,isSample:false,isHoldCopyright:true}") == ListeningAccess.FREE)
+            check(state("{isPaid:false,isHoldCopyright:true}") == ListeningAccess.FREE)
+            check(state("{isPaid:false,isPublic:true}") == ListeningAccess.FREE)
             check(state("{isPaid:true,isFree:true,isAuthorized:true,vipFreeType:1}") == ListeningAccess.FREE)
             check(state("{isPaid:true,isFree:false,isAuthorized:true,vipFreeType:1}") == ListeningAccess.AUTHORIZED)
             check(state("{isPaid:true,isFree:false,isAuthorized:false,vipFreeType:1}") == ListeningAccess.VIP_REQUIRED)

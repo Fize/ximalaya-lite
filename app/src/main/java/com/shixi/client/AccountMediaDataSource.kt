@@ -13,7 +13,10 @@ import com.shixi.protocol.ListeningAccess
 class AccountMediaDataSource(private val upstream: DataSource, private val identity: () -> Any) : DataSource {
     private var owner: Any? = null
     private var firstRead = true
-    private fun checkOwner() { if (owner != identity()) throw ContentAccessException(ListeningAccess.UNKNOWN, "账号会话已改变，请重新选择节目") }
+    private fun checkOwner() {
+        if (owner != identity())
+            throw ContentAccessException(ListeningAccess.UNKNOWN, "账号会话已改变，请重新选择节目", sessionChanged = true)
+    }
     override fun addTransferListener(listener: TransferListener) = upstream.addTransferListener(listener)
     override fun open(dataSpec: DataSpec): Long {
         owner = identity()

@@ -24,8 +24,9 @@ object EpisodeAccess {
     fun classify(o: JSONObject, vipAlbum: Boolean = false): ListeningAccess {
         if (o.opt("isHoldCopyright") == false || o.opt("isPublic") == false) return ListeningAccess.UNAVAILABLE
         if (o.opt("isSample") == true) return ListeningAccess.TRIAL
-        if (o.opt("isPaid") == false && o.opt("isHoldCopyright") == true && o.opt("isSample") == false)
-            return ListeningAccess.FREE
+        // Live free episodes omit isSample/isHoldCopyright in some catalogue responses.
+        // A missing flag is not a denial; explicit false/sample values are handled above.
+        if (o.opt("isPaid") == false) return ListeningAccess.FREE
         if (o.opt("isPaid") == true) {
             if (o.opt("isFree") == true && o.opt("isAuthorized") == true) return ListeningAccess.FREE
             if (o.opt("isAuthorized") == true) return ListeningAccess.AUTHORIZED
@@ -36,7 +37,8 @@ object EpisodeAccess {
         return ListeningAccess.UNKNOWN
     }
 }
-class ContentAccessException(val access: ListeningAccess, detail: String = access.label, val serviceCode: Int? = null) : java.io.IOException(detail)
+class ContentAccessException(val access: ListeningAccess, detail: String = access.label,
+    val serviceCode: Int? = null, val sessionChanged: Boolean = false) : java.io.IOException(detail)
 class ContentServiceException(detail: String) : java.io.IOException(detail)
 /** Product copy never exposes raw HTTP responses, credentials, or implementation diagnostics. */
 fun userContentMessage(failure: Exception): String = when (failure) {
@@ -44,7 +46,11 @@ fun userContentMessage(failure: Exception): String = when (failure) {
         ListeningAccess.UNAVAILABLE -> "该内容暂不可收听"
         ListeningAccess.TRIAL -> "暂不支持本集试听"
         ListeningAccess.VIP_REQUIRED, ListeningAccess.PAID_REQUIRED -> "当前账号暂无本集收听权益"
-        else -> if (failure.serviceCode in setOf(50, 401, 403)) "登录状态需要更新，请重试" else "账号状态已变化，请重新选择节目"
+        else -> when {
+            failure.sessionChanged -> "账号状态已变化，请重新选择节目"
+            failure.serviceCode in setOf(50, 401, 403) -> "登录状态需要更新，请重试"
+            else -> "暂时无法确认本集权限，请重试"
+        }
     }
     is java.net.SocketTimeoutException -> "连接超时，请重试"
     is ContentServiceException -> "内容服务暂时不可用，请稍后重试"
@@ -126,7 +132,9 @@ class ContentApi(private val paidAddress: ((Item) -> String)? = null, private va
     fun tracks(albumId: Long, page: Int = 1): List<Item> {
         require(page > 0)
         require(albumId > 0)
-        val url = "https://mobile.ximalaya.com/mobile/v1/album/track/ts-${System.currentTimeMillis()}?albumId=$albumId&pageId=$page&pageSize=20&isAsc=true&device=android"
+        val url = "https://mobile.ximalaya.com/mobile/v1/album/track/ts-${System.currentTimeMillis()}" +
+            "?track_base_url=https%3A%2F%2Fmobile.ximalaya.com&load_play_list_by_track_id=true&url_from=tracklist" +
+            "&albumId=$albumId&pageId=$page&pageSize=20&isAsc=true&device=android"
         val list = try { read(request(url).build()).optJSONObject("data")?.optJSONArray("list") ?: error("节目列表响应格式不支持") }
             catch (failure: ContentAccessException) { if (!legacyUnavailable(failure)) throw failure; catalogue(albumId, page) }
         // Album metadata is only a content-type hint, never inherited as a per-episode grant.
@@ -168,9 +176,11 @@ class ContentApi(private val paidAddress: ((Item) -> String)? = null, private va
             throw ContentAccessException(ListeningAccess.UNAVAILABLE)
         if (info.opt("isSample") == true || info.opt("isTrailer") == true) throw ContentAccessException(ListeningAccess.TRIAL)
         val paid = info.opt("isPaid")
-        val granted = if (paid == false) track.free && EpisodeAccess.classify(info) !in setOf(ListeningAccess.TRIAL, ListeningAccess.UNAVAILABLE)
+        val access = EpisodeAccess.classify(info)
+        // The fresh response owns the grant. A stale list flag must never block a free episode.
+        val granted = if (paid == false) access == ListeningAccess.FREE
             else paid == true && info.opt("isAuthorized") == true
-        if (!granted) throw ContentAccessException(EpisodeAccess.classify(info))
+        if (!granted) throw ContentAccessException(access)
         // Unlike tracks/{id}.json, this endpoint also returns playable URLs for free prefixes.
         val raw = info.optString("playUrl64").takeUnless { it == "null" }.orEmpty()
             .ifBlank { info.optString("playUrl32").takeUnless { it == "null" }.orEmpty() }

@@ -329,7 +329,7 @@ class MainActivity : ComponentActivity() {
                             val identity = accountManager.contentIdentity()
                             val checked = withContext(Dispatchers.IO) { val fresh = if (entry.access == com.shixi.protocol.ListeningAccess.UNKNOWN) content.tracks(entry.albumId, entry.page).firstOrNull { it.id == entry.id } ?: content.locateTrack(entry.albumId, entry.id) else entry; content.resolve(fresh); fresh }
                             if (ticket != playbackIntentGeneration || tab != destinationTab || (stack.toList() != destination && stack.toList() != destination + "player-$destinationTab")) return@launch
-                            if (accountManager.contentIdentity() != identity) throw com.shixi.protocol.ContentAccessException(com.shixi.protocol.ListeningAccess.UNKNOWN, "账号会话已改变，请重新选择节目")
+                            if (accountManager.contentIdentity() != identity) throw com.shixi.protocol.ContentAccessException(com.shixi.protocol.ListeningAccess.UNKNOWN, "账号会话已改变，请重新选择节目", sessionChanged = true)
                             val verified = checked.copy(access = if (checked.free) com.shixi.protocol.ListeningAccess.FREE else com.shixi.protocol.ListeningAccess.AUTHORIZED)
                             val mark: (Item) -> Item = { if (it.id == verified.id && it.albumId == verified.albumId) it.copy(free = verified.free, access = verified.access) else it }
                             albumEntries = ArrayList(albumEntries.map(mark))
@@ -345,7 +345,17 @@ class MainActivity : ComponentActivity() {
                         } finally { if (ticket == playbackIntentGeneration) { checkingAccess = false; pendingTrackId = null } }
                     }
                 }
-                fun playTrack(entry: Item, requestedHistory: HistoryRow? = null) { authorizeTrack(entry) { verified -> startTrack(verified, requestedHistory) } }
+                fun playTrack(entry: Item, requestedHistory: HistoryRow? = null) {
+                    val player = controller
+                    val current = player?.currentMediaItem?.let(PlaybackItems::item)
+                    // The original player reuses the loaded source for "continue listening".
+                    // Only a fresh selection of another episode needs a new grant.
+                    if (player != null && player.playbackState != Player.STATE_IDLE && player.playerError == null &&
+                        current?.id == entry.id && current.albumId == entry.albumId) {
+                        startTrack(entry, requestedHistory); return
+                    }
+                    authorizeTrack(entry) { verified -> startTrack(verified, requestedHistory) }
+                }
                 @Composable fun AccessFeedback() {
                     accessMessage?.let { text -> FloatingNotice(text, if (guestAccess) { if (accountState.signedIn) "账号" else "登录" } else "重试", if (guestAccess) ({ openAccount() }) else retryAccess) }
                 }
