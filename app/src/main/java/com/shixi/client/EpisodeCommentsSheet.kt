@@ -21,24 +21,28 @@ import androidx.compose.ui.semantics.heading
 import androidx.compose.ui.semantics.semantics
 import androidx.compose.ui.unit.dp
 import com.shixi.protocol.EpisodeComment
+import com.shixi.protocol.Item
 import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
 
 @Composable
-internal fun EpisodeCommentsSheet(trackId: Long, signedIn: Boolean, api: AccountContentApi, actions: SocialActionsApi, countUpdated: (Long) -> Unit, login: () -> Unit) {
+internal fun EpisodeCommentsSheet(track: Item, signedIn: Boolean, api: AccountContentApi, actions: SocialActionsApi, countUpdated: (Long) -> Unit, login: () -> Unit) {
+    // One tag per episode: switching episodes must discard every trace of the previous list.
+    key(track.id) {
+    val trackId = track.id
     val scope = rememberCoroutineScope()
     val scroll = rememberLazyListState()
-    var rows by remember(trackId) { mutableStateOf<List<EpisodeComment>>(emptyList()) }
-    var page by remember(trackId) { mutableIntStateOf(0) }
-    var more by remember(trackId) { mutableStateOf(true) }
-    var loading by remember(trackId) { mutableStateOf(false) }
-    var error by remember(trackId) { mutableStateOf(false) }
-    var retryNext by remember(trackId) { mutableStateOf(false) }
-    var sending by remember(trackId) { mutableStateOf(false) }
-    var draft by remember(trackId) { mutableStateOf("") }
-    var notice by remember(trackId) { mutableStateOf("") }
+    var rows by remember { mutableStateOf<List<EpisodeComment>>(emptyList()) }
+    var page by remember { mutableIntStateOf(0) }
+    var more by remember { mutableStateOf(true) }
+    var loading by remember { mutableStateOf(false) }
+    var error by remember { mutableStateOf(false) }
+    var retryNext by remember { mutableStateOf(false) }
+    var sending by remember { mutableStateOf(false) }
+    var draft by remember { mutableStateOf("") }
+    var notice by remember { mutableStateOf("") }
     fun load(next: Boolean = false) {
         if (loading) return
         loading = true; error = false; retryNext = next
@@ -56,7 +60,7 @@ internal fun EpisodeCommentsSheet(trackId: Long, signedIn: Boolean, api: Account
         }
     }
     Column(Modifier.fillMaxWidth().fillMaxHeight(0.88f).imePadding().padding(horizontal = 20.dp)) {
-        Text("评论", style = MaterialTheme.typography.titleLarge, modifier = Modifier.padding(vertical = 12.dp).semantics { heading() })
+        Text(if (track.title.isBlank()) "评论" else "评论 · ${track.title}", style = MaterialTheme.typography.titleLarge, modifier = Modifier.padding(vertical = 12.dp).semantics { heading() })
         LazyColumn(state = scroll, modifier = Modifier.fillMaxWidth().weight(1f)) {
             items(rows, key = { it.id }) { comment ->
                 Row(Modifier.fillMaxWidth().padding(vertical = 12.dp), horizontalArrangement = Arrangement.spacedBy(12.dp), verticalAlignment = Alignment.Top) {
@@ -88,5 +92,6 @@ internal fun EpisodeCommentsSheet(trackId: Long, signedIn: Boolean, api: Account
             }) { Text(if (sending) "发送中…" else "发送") }
         }
         Spacer(Modifier.height(12.dp))
+    }
     }
 }

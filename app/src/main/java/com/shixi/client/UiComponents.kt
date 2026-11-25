@@ -62,6 +62,7 @@ enum class AppIcon(val path: String) {
     Comment("M4 3h16a2 2 0 0 1 2 2v12a2 2 0 0 1-2 2H9l-5 3v-3H4a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2m0 2v12h2v1.5L8.5 17H20V5z"),
     Heart("M12 21s-9-5.7-9-11a5 5 0 0 1 9-3 5 5 0 0 1 9 3c0 5.3-9 11-9 11m0-2.4c2.3-1.6 7-5.3 7-8.6a3 3 0 0 0-5.4-1.8L12 10l-1.6-1.8A3 3 0 0 0 5 10c0 3.3 4.7 7 7 8.6"),
     HeartFilled("M12 21s-9-5.7-9-11a5 5 0 0 1 9-3 5 5 0 0 1 9 3c0 5.3-9 11-9 11"),
+    Close("M19 6.41 17.59 5 12 10.59 6.41 5 5 6.41 10.59 12 5 17.59 6.41 19 12 13.41 17.59 19 19 17.59 13.41 12z"),
     Clean("M4 5h16v2H4zm4-3h8v2H8zm-2 6h12l-1 14H7zm3 2v9h2v-9zm4 0v9h2v-9z");
     val vector: ImageVector by lazy { ImageVector.Builder(name, 24.dp, 24.dp, 24f, 24f)
         .addPath(PathParser().parsePathString(path).toNodes(), fill = SolidColor(Color.Black), pathFillType = PathFillType.EvenOdd).build() }

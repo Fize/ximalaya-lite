@@ -408,8 +408,9 @@ class MainActivity : ComponentActivity() {
                 var albumExtras by remember { mutableStateOf(Bundle.EMPTY) }
                 LaunchedEffect(controller) { while (true) { albumExtras = controller?.sessionExtras ?: Bundle.EMPTY; delay(300) } }
                 if (sheet == "comments") currentTrack?.let { track ->
+                    val social = remember { SocialActionsApi(this@MainActivity) }
                     ModalBottomSheet(onDismissRequest = { sheet = null }, sheetState = rememberModalBottomSheetState(skipPartiallyExpanded = true)) {
-                        androidx.compose.runtime.key(track.id) { EpisodeCommentsSheet(track.id, accountState.signedIn, content, remember { SocialActionsApi(this@MainActivity) }, { count -> if (currentTrack?.id == track.id) { commentCountRevision++; commentCount = count } }) { sheet = null; openAccount() } }
+                        EpisodeCommentsSheet(track, accountState.signedIn, content, social, { count -> if (currentTrack?.id == track.id) { commentCountRevision++; commentCount = count } }) { sheet = null; openAccount() }
                     }
                 }
                 if (sheet == "queue") ModalBottomSheet(onDismissRequest = { sheet = null }, sheetState = rememberModalBottomSheetState(skipPartiallyExpanded = true)) {
@@ -597,10 +598,13 @@ class MainActivity : ComponentActivity() {
                                     if (requestError != null && !loading && entries.isEmpty()) InlineNotice(searchMessage) { loadSearch() }
                                     else Text(searchMessage, color = MaterialTheme.colorScheme.onSurfaceVariant, modifier = Modifier.padding(vertical = 8.dp))
                                     if (local.searches.isNotEmpty()) Text("最近搜索", style = MaterialTheme.typography.titleMedium)
-                                    local.searches.forEach { saved -> Row(verticalAlignment = Alignment.CenterVertically) {
-                                        TextButton(modifier = Modifier.weight(1f), onClick = { query = saved; loadSearch() }) { Text(saved) }
-                                        TextButton(modifier = Modifier.semantics { contentDescription = "删除搜索历史 $saved" }, onClick = { localStore.removeSearch(saved) }) { Text("删除") }
-                                    } }
+                                    Row(Modifier.fillMaxWidth().horizontalScroll(rememberScrollState()), horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                                        local.searches.forEach { saved ->
+                                            InputChip(selected = false, onClick = { query = saved; loadSearch() }, label = { Text(saved, maxLines = 1, overflow = TextOverflow.Ellipsis) }, trailingIcon = {
+                                                Box(Modifier.size(24.dp).clickable(onClickLabel = "删除搜索历史 $saved") { localStore.removeSearch(saved) }.semantics { contentDescription = "删除搜索历史 $saved" }, contentAlignment = Alignment.Center) { AppSymbol(AppIcon.Close, null, Modifier.size(14.dp)) }
+                                            })
+                                        }
+                                    }
                                     } }; gridItems(entries, key = { it.id }, span = { GridItemSpan(maxLineSpan) }) { item -> AlbumLine(item) { openAlbum(item) } }; if (moreSearch) item { TextButton(enabled = !loading, onClick = { loadSearch(true) }) { Text("加载更多专辑") } } }
 
                         } else {
