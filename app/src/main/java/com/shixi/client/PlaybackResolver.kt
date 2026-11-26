@@ -10,11 +10,14 @@ class PlaybackAccessException : IOException("当前节目没有明确的收听�
 
 /** Memory-only, short-lived addresses. Every fresh resolution rechecks the programme flags. */
 class PlaybackResolver(private val tracks: (Long, Int) -> List<Item>, private val address: (Item) -> String,
-    private val clock: () -> Long = SystemClock::elapsedRealtime, private val owner: () -> Any = { Unit }) {
+    private val clock: () -> Long = SystemClock::elapsedRealtime, private val owner: () -> Any = { Unit },
+    /** kind = "room" | "radio"; id = roomId/radioId; extra = liveId/bitrate. Blocking, like [address]. */
+    private val liveAddress: ((String, Long, Long) -> String)? = null) {
     private data class Cached(val url: Uri, val expires: Long, val owner: Any)
     private val cache = LinkedHashMap<String, Cached>()
     private var generation = 0L
     fun resolve(uri: Uri): Uri {
+        if (uri.scheme == "shixi" && uri.host == "live") return live(uri)
         if (uri.scheme != "shixi" || uri.host != "track" || uri.pathSegments.size != 3 || uri.query != null)
             throw IOException("不支持的媒体地址")
         val parts = uri.pathSegments
@@ -44,6 +47,28 @@ class PlaybackResolver(private val tracks: (Long, Int) -> List<Item>, private va
         }
         return result
     }
+    private fun live(uri: Uri): Uri {
+        val parts = uri.pathSegments
+        if (parts.size != 3 || uri.query != null) throw IOException("不支持的直播地址")
+        val kind = parts[0]
+        if (kind != "room" && kind != "radio") throw IOException("不支持的直播地址")
+        val id = parts[1].toLongOrNull()?.takeIf { it > 0 } ?: throw IOException("无效直播频道")
+        val extra = parts[2].toLongOrNull()?.takeIf { it > 0 } ?: throw IOException("无效直播参数")
+        val provider = liveAddress ?: throw IOException("直播播放暂不可用")
+        val identity = owner()
+        val key = uri.toString()
+        synchronized(this) {
+            cache[key]?.takeIf { it.expires > clock() && it.owner == identity }?.let { return it.url }
+        }
+        val url = Uri.parse(provider(kind, id, extra))
+        if (url.scheme != "https" || url.host.isNullOrBlank()) throw IOException("未取得安全的直播地址")
+        synchronized(this) {
+            if (cache.size >= 8) cache.remove(cache.keys.first())
+            cache[key] = Cached(url, clock() + 60_000, identity)
+        }
+        return url
+    }
+
     @Synchronized fun invalidate(uri: Uri?) { generation++; if (uri == null) cache.clear() else cache.remove(uri.toString()) }
     companion object {
         fun live(context: android.content.Context): PlaybackResolver { val api = AccountContentApi(context); return PlaybackResolver(api::tracks, api::resolve, owner = AccountManager.get(context)::contentIdentity) }

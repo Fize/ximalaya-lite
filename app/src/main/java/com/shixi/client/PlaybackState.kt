@@ -27,6 +27,27 @@ object PlaybackItems {
         .setMediaMetadata(androidx.media3.common.MediaMetadata.Builder().setTitle(track.title).setDisplayTitle(track.title)
             .setSubtitle("Ximalaya Lite").setArtist("").setAlbumArtist("").setArtworkUri(track.cover.takeIf { it.startsWith("https://") }?.let { android.net.Uri.parse(it) }).build()).build()
 
+    /** Live rooms and radio stations share the HLS pipeline but never the album queue. */
+    fun live(kind: String, id: Long, extra: Long, title: String, subtitle: String, cover: String): MediaItem =
+        MediaItem.Builder()
+            .setMediaId("live:$kind:$id:$extra")
+            .setUri("shixi://live/$kind/$id/$extra")
+            .setMimeType(androidx.media3.common.MimeTypes.APPLICATION_M3U8)
+            .setMediaMetadata(
+                androidx.media3.common.MediaMetadata.Builder()
+                    .setTitle(title)
+                    .setDisplayTitle(title)
+                    .setSubtitle(subtitle)
+                    .setArtist(subtitle)
+                    .setArtworkUri(cover.takeIf { it.startsWith("https://") }?.let(android.net.Uri::parse))
+                    .build()
+            )
+            .build()
+
+    fun isLive(media: MediaItem?): Boolean = media?.mediaId?.startsWith("live:") == true
+
+    fun liveKey(media: MediaItem?): String = if (isLive(media)) media?.mediaId.orEmpty() else ""
+
     fun item(media: MediaItem): Item? {
         val parts = media.mediaId.split(":")
         val id = parts.getOrNull(0)?.toLongOrNull() ?: return null
@@ -38,6 +59,11 @@ object PlaybackItems {
     }
     fun status(player: MediaController): String {
         if (!player.sessionExtras.getBoolean("storageReady", false)) return "正在准备"
+        if (player.sessionExtras.getBoolean("liveMode", false)) {
+            if (player.playerError != null) return "直播连接失败，请重试"
+            if (!player.playWhenReady) return "已暂停"
+            return if (player.playbackState == Player.STATE_BUFFERING || player.playbackState == Player.STATE_IDLE) "正在连接直播" else "正在直播"
+        }
         val issue = player.sessionExtras.getString("playbackIssue").orEmpty()
         if (issue.isNotBlank()) return "暂时无法播放，请重试"
         if (player.playerError != null) return "播放失败，请重新连接"
