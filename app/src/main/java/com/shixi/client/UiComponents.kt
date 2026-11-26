@@ -42,6 +42,7 @@ enum class AppIcon(val path: String) {
     Home("M12 3 2 12h3v9h6v-6h2v6h6v-9h3z"),
     Discover("M12 2a10 10 0 1 0 0 20 10 10 0 0 0 0-20m0 2a8 8 0 1 1 0 16 8 8 0 0 1 0-16m5 3-3 7-7 3 3-7z"),
     Library("M3 3h5v18H3zm7 0h5v18h-5zm7 1 4-1 3 17-4 1z"),
+    Crown("M3 7l4 4 5-5 5 5 4-4-2 10H5zM5 19h14v2H5z"),
     Scan("M3 3h6v2H5v4H3zm12 0h6v6h-2V5h-4zM3 15h2v4h4v2H3zm16 0h2v6h-6v-2h4zM7 7h4v4H7zm6 0h4v4h-4zM7 13h4v4H7zm6 0h2v2h2v2h-4z"),
     Search("M10 2a8 8 0 1 0 0 16 8 8 0 0 0 0-16m0 2a6 6 0 1 1 0 12 6 6 0 0 1 0-12m6 11 7 7-1.5 1.5-7-7z"),
     Settings("M10 2h4l.7 3 2 .9 2.8-.9 2 3.5-2.1 2.2v2.6l2.1 2.2-2 3.5-2.8-.9-2 .9L14 22h-4l-.7-3-2-.9-2.8.9-2-3.5 2.1-2.2v-2.6L2.5 8.5 4.5 5l2.8.9 2-.9zM12 8a4 4 0 1 0 0 8 4 4 0 0 0 0-8"),
@@ -366,7 +367,8 @@ fun speedText(speed: Float): String = java.math.BigDecimal.valueOf(speed.toDoubl
 }
 @Composable fun SettingsScreen(account: String, speed: Float, ready: Boolean, cacheMessage: String, clearingCache: Boolean, version: String,
     onBack: () -> Unit, onAccount: () -> Unit, onSpeed: () -> Unit, onSleep: () -> Unit, onClearCache: () -> Unit,
-    cloud: CloudState = CloudState(), cloudVisible: Boolean = false, onSync: () -> Unit = {}, sleep: String = "关闭") {
+    cloud: CloudState = CloudState(), cloudVisible: Boolean = false, onSync: () -> Unit = {}, sleep: String = "关闭",
+    membership: MembershipStatus = MembershipStatus.SignedOut, onMembership: () -> Unit = {}) {
     if (cacheMessage.isNotEmpty()) FloatingNotice(cacheMessage)
     val accountLabel = accountStatusText(account)
     RefreshContent(cloudVisible && cloud.refreshing, onSync, Modifier.fillMaxSize()) {
@@ -374,6 +376,14 @@ fun speedText(speed: Float): String = java.math.BigDecimal.valueOf(speed.toDoubl
             item { Row(verticalAlignment = Alignment.CenterVertically) { SymbolButton(AppIcon.Back, "返回", onClick = onBack); Text("设置", style = MaterialTheme.typography.headlineLarge) } }
             item { SettingsGroup("账号") {
                 SettingRow("账号与同步", accountLabel, AppIcon.Person, onClick = onAccount)
+                HorizontalDivider(Modifier.padding(horizontal = 16.dp), color = MaterialTheme.colorScheme.outlineVariant)
+                SettingRow("会员有效期", membershipText(membership), AppIcon.Crown,
+                    enabled = membership != MembershipStatus.Loading,
+                    onClick = when (membership) {
+                        MembershipStatus.SignedOut -> onAccount
+                        MembershipStatus.Unavailable -> onMembership
+                        else -> null
+                    })
                 if (cloudVisible) {
                     HorizontalDivider(Modifier.padding(horizontal = 16.dp), color = MaterialTheme.colorScheme.outlineVariant)
                     SettingRow("同步收听记录", syncViewText(cloud), AppIcon.Library, enabled = !cloud.busy, onClick = onSync)

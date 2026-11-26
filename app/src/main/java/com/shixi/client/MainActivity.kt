@@ -91,6 +91,7 @@ class MainActivity : ComponentActivity() {
                 val keyboard = LocalSoftwareKeyboardController.current
                 val api = remember { ContentApi() }
                 val content = remember { AccountContentApi(this@MainActivity) }
+                val membershipApi = remember { MembershipApi(this@MainActivity) }
                 val discovery = remember { DiscoveryStore.get(this@MainActivity) }
                 var query by rememberSaveable { mutableStateOf("") }
                 var searchMessage by rememberSaveable { mutableStateOf("输入关键词搜索专辑") }
@@ -548,8 +549,25 @@ class MainActivity : ComponentActivity() {
                             Spacer(Modifier.height(24.dp))
                         }
                     } else if (key == "settings-$tab") Box(Modifier.fillMaxSize().padding(padding).padding(horizontal = 20.dp)) {
+                        // Reopening settings refreshes the account-bound membership snapshot.
+                        var membership by remember(accountState.signedIn, accountState.generation) {
+                            mutableStateOf<MembershipStatus>(if (accountState.signedIn) MembershipStatus.Loading else MembershipStatus.SignedOut)
+                        }
+                        var membershipAttempt by remember(accountState.generation) { mutableIntStateOf(0) }
+                        LaunchedEffect(accountState.signedIn, accountState.generation, accountState.credentialRevision, membershipAttempt) {
+                            if (!accountState.signedIn) { membership = MembershipStatus.SignedOut; return@LaunchedEffect }
+                            val lease = accountManager.lease()
+                            if (lease == null) { membership = MembershipStatus.SignedOut; return@LaunchedEffect }
+                            membership = MembershipStatus.Loading
+                            membership = withContext(Dispatchers.IO) {
+                                try { membershipApi.read(lease)?.let { MembershipStatus.Known(it) } ?: MembershipStatus.None }
+                                catch (cancelled: CancellationException) { throw cancelled }
+                                catch (_: Exception) { MembershipStatus.Unavailable }
+                            }
+                        }
                         SettingsScreen(accountState.status, playbackSpeed, storageReady && controller != null, cacheMessage, clearingCache, versionName,
-                            ::navigateBack, ::openAccount, { sheet = "speed" }, { sheet = "sleep" }, ::clearCovers, cloudState, cloudVisible, { refreshLibrary() }, sleepLabel)
+                            ::navigateBack, ::openAccount, { sheet = "speed" }, { sheet = "sleep" }, ::clearCovers, cloudState, cloudVisible, { refreshLibrary() }, sleepLabel,
+                            membership, { membershipAttempt++ })
                     } else Column(Modifier.fillMaxSize().padding(padding).padding(horizontal = 20.dp)) {
                         AccessFeedback()
                         if (connectionFailed) FloatingNotice("播放器连接失败", "重试") { recreate() }

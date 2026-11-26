@@ -12,6 +12,30 @@ internal fun accountStatusText(status: String): String = when (status) {
     else -> "请稍候…"
 }
 
+internal fun membershipText(status: MembershipStatus, zone: java.time.ZoneId = java.time.ZoneId.systemDefault()): String = when (status) {
+    MembershipStatus.SignedOut -> "登录后查看"
+    MembershipStatus.Loading -> "正在获取…"
+    MembershipStatus.None -> "未开通会员"
+    MembershipStatus.Unavailable -> "暂时无法获取"
+    is MembershipStatus.Known -> {
+        val membership = status.membership
+        val date = membershipDate(membership.expiresAt, zone)
+        when {
+            membership.active && date != null -> "${membership.name} $date 到期"
+            membership.active && membership.expiresAt <= 0 -> "${membership.name} 长期有效"
+            membership.active -> "${membership.name} 有效期未知"
+            date != null -> "${membership.name} 已于 $date 过期"
+            else -> "${membership.name} 已过期"
+        }
+    }
+}
+
+/** Epoch milliseconds; values outside 2000–2200 are not rendered as a date. */
+internal fun membershipDate(expiresAt: Long, zone: java.time.ZoneId = java.time.ZoneId.systemDefault()): String? {
+    if (!isPlausibleExpiry(expiresAt)) return null
+    return java.time.Instant.ofEpochMilli(expiresAt).atZone(zone).toLocalDate().toString()
+}
+
 internal fun accountFeedback(result: String): String = when {
     result == "登录状态校验通过。" -> "登录成功"
     result == "刷新并校验通过。" -> "登录状态已更新"
