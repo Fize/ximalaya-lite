@@ -30,22 +30,26 @@
 | 域 | 接口 | 实测结果 | 结论 |
 |---|---|---|---|
 | 发现 tab 配置 | `mobile.ximalaya.com/mobile/discovery/v1/tabs` | 200，5 个 tab：推荐/分类/广播/榜单/主播 | 结构可对齐官方 |
-| 推荐 | `.../discovery/v1/recommend/album?device=android&pageId=1&pageSize=6&includeActivity=false&includeSpecial=false` | 200，模块：`focus` `square` `guessYouLike` `ad` `playlist` `live` `categoriesForExplore` `cityCategory` `recommendAlbum` | 可用；`pageId` 只是**轮换**（第 1/2 页 6 条中 5 条重复），不能当无限流 |
-| 分类树 | `www.ximalaya.com/revision/category/allCategoryInfo` | 200，5 个分组 / 28 个内容分类（如「历史」） | 可用 |
-| 分类结果 | `m.ximalaya.com/m-revision/page/category/queryCategoryPage?categoryCode=lishi&page=1` | 200；该分类下另有 24 个子类（正史/野史/军事…）；`pageSize=20`、`totalCount=1000`、`sort=0/1/2` 均可用；5 个筛选维度（节目形式/主播/年代/是否完本/是否付费） | 可用，支持分页 + 排序 + 筛选 |
-| 广播（列表） | 推荐流 `live` 模块 | 字段：`roomId` `name` `nickname` `playCount` `status` `cover*` `categoryName` `tingUrl` | 列表可用 |
-| 广播（播放） | 未定位到推流接口 | `live.ximalaya.com/*` 全部 404/403 | **风险**，见 §13 Q1 |
-| 榜单 | `m.ximalaya.com/m-revision/page/rank/queryRank?clusterCode=&categoryCode=` | 接口存在；有效 `clusterCode` 未知（传值被忽略返回空） | **参数待枚举** |
-| 主播 | 未找到列表接口 | `recommend/anchor` 返回的是专辑流，不是主播；`queryAnchorDetail` 等 404 | **缺口**，见 §13 Q2 |
-| 听单 | 推荐流 `playlist` 模块（`specialId`） | 列表字段可用；详情接口未验证 | 风险，可降级隐藏模块 |
-| 播放 | 现有 `ContentApi.resolve` + `PlaybackService` | 已实现免费/授权/VIP/付费判定与播放 | 复用，无需改动 |
+| 推荐 | 移动流 `.../discovery/v1/recommend/album`；Web `www.ximalaya.com/revision/explore/v2/getRecommend` 与 `.../explore/guessYouLike` | 移动流返回 11 个模块槽位，`pageId` 轮换后 5 页仅 **10 张唯一专辑**；Web 卡片固定 5 个分类（23–31 张/卡）且**含主播名/播放量**；`guessYouLike` 固定 52 条 | **推荐主数据源改用 Web**；移动流作兜底，不做无限流 |
+| 分类树 | `www.ximalaya.com/revision/category/allCategoryInfo`；`.../breadcrumbCategoryInfo?categoryId=9` | 5 个分组 / 28 个内容分类；breadcrumb 返回 **29 个分类（含党员学习园地）及 `pinyin`** | 分类导航必须用 `pinyin`（`lishi`），`name`（`culture`）无效 |
+| 分类结果 | `m.ximalaya.com/m-revision/page/category/queryCategoryPage` + `.../queryCategoryAlbumsByPage` | 200；子类 24 个；`page` 生效；`sort=0/1/2`；`metas=维度_值-维度_值` 生效 | 可用，支持分页 + 排序 + 筛选 |
+| 广播（电台） | `live.ximalaya.com/radio-first-page-app/homePage` | 200；3 模块 / 27 个电台，每个电台带 `playUrl.aac24/aac64` | **HLS 可播**（已抽测 5 个电台） |
+| 广播（直播间） | 推荐流 `live` 模块（固定 3 条）；`/lamia/v12/live/room?roomId=` | 房间详情 200，但**无推流字段**；H5 只跳 `iting://` | 直播间只能展示，不能播 |
+| 榜单 | `m.ximalaya.com/m-revision/page/rank/queryRankCluster`、`.../queryRankClusterDetail`、`.../queryRank` | 6 个榜单；热播榜 27 类目；`clusterCode=hotplay&categoryCode=all` 返回 97 条 | 可用；不做分页 |
+| 主播 | `.../rank/queryRank?clusterCode=anchorInfluence&categoryCode=voiceActor74` | 6 个子榜，每榜最多 100 位；`/revision/user?uid=` 返回 15 张专辑（总数 120，**无分页**） | 列表/详情可用；专辑最多展示 15 张 |
+| 听单 | 推荐流 `playlist`（`specialId`） | 详情接口全部失败 | **隐藏该模块** |
+| 播放 | 现有 `ContentApi.resolve` + `PlaybackService`；Web 专辑详情 `.../revision/album?albumId=` | `baseInfo` 返回 `playUrl64`；Web 专辑详情含主播/简介/播放量/首屏 30 集 | 复用现有播放；专辑页可补元数据 |
+
+> 完整接口、参数、字段与复现命令见 `api-spec.md`。
 
 **推导出的硬约束**
 
-- 推荐页不能做“无限下滑加载更多”，只能**换一换**（`pageId` 轮换）。
-- 分类页可以做真分页 + 排序 + 筛选。
-- 推荐流里的 `guessYouLike` 项**没有主播名**（字段里无 `nickname`），卡片副行必须容忍缺字段；`categoriesForExplore` / `cityCategory` / 分类页有 `anchorInfo.nickname`。
-- `ad` 模块必须过滤；`focus` / `square` 只在内容型条目时渲染。
+- 推荐页不能做“无限下滑加载更多”；移动流 5 页仅 10 张唯一专辑，Web 猜你喜欢固定 52 条。
+- 推荐主数据源用 Web 卡片（含 `albumUserNickName`），“换一换”改为重新拉取 Web 卡片。
+- 分类页可以做真分页 + 排序 + 筛选；导航 code 必须用 pinyin。
+- 广播可播放的是**电台**（HLS），不是直播间；直播间无推流字段。
+- 听单详情缺失，推荐页不渲染 `playlist` 模块。
+- `ad` 模块必须按 `moduleType` 过滤（匿名响应为空，但不能依赖内容为空）。
 
 ---
 
@@ -588,14 +592,15 @@
 
 ## 13. 决策记录（已确认）
 
-| ID | 问题 | 决策 | 对设计的影响 |
+| ID | 问题 | 决策 | 实测结果 / 对设计的影响 |
 |---|---|---|---|
-| Q1 | 广播推流地址未找到（`live.ximalaya.com` 路径全 404） | **限时逆向直播协议**；失败则回退到入口保留 + 明确重试态，并把结论写回文档 | W-05 直播间的「连接中 / 失败 / 重试」三态为必需；直播播放器隐藏进度/倍速/略过头尾 |
-| Q2 | 主播列表接口未找到（`recommend/anchor` 返回专辑流，不是主播） | **继续找官方接口**；找不到时回退到用订阅/常听主播反查 | W-07/W-08 的字段（粉丝数、标签）以接口实际返回为准；缺失字段整行不渲染 |
-| Q3 | 个性化开关默认值 | **默认开启**（登录后生效，可关闭） | §10 文案与验收按「默认开」编写 |
-| Q4 | 听单详情接口未验证 | 先验证；失败则整块不渲染 | 精品听单模块按「有数据才显示」设计，不留空标题 |
+| Q1 | 广播推流地址未找到 | **限时逆向直播协议** | **直播推流仍未找到**：房间详情 `lamia/v12/live/room` 无推流字段，H5 只跳 `iting://`；但**电台** `radio-first-page-app/homePage` 返回 27 个电台且 `playUrl.aac64` 为有效 HLS。广播 tab 可改为「电台」实现播放；直播间只能展示 |
+| Q2 | 主播列表接口未找到 | **继续找官方接口** | **已找到**：`queryRank?clusterCode=anchorInfluence&categoryCode=voiceActor74` 等 6 个子榜，每榜最多 100 位；详情用 `/revision/user/basic` + `/revision/user`（最多 15 张专辑） |
+| Q3 | 个性化开关默认值 | **默认开启**（登录后生效，可关闭） | 接口无显式 opt-out；匿名态无法验证个性化效果，只能按「是否携带身份」实现并标注未验证 |
+| Q4 | 听单详情接口未验证 | 先验证；失败则整块不渲染 | **验证失败**：`specialId` 无可用详情接口 → 推荐页不渲染 `playlist` 模块 |
 
-> 线框已批准进入 Stage 3，视觉规格见 `visual-spec.md`。
+> 线框已批准进入 Stage 3，视觉规格见 `visual-spec.md`；接口细节与复现命令见 `api-spec.md`。
+> 广播范围（电台 vs 直播间）需重新确认后，再修订 W-04/W-05。
 
 ---
 
