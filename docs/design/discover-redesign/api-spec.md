@@ -25,7 +25,8 @@
 | 主播资料 | `GET www.ximalaya.com/revision/user/basic?uid=` | 200 | — |
 | 主播专辑 | `GET www.ximalaya.com/revision/user?uid=` | 200；每次 15 张（总数 120），**无分页** | 可播 |
 | 电台首页 | `GET live.ximalaya.com/radio-first-page-app/homePage` | 200；3 个模块 / 27 个电台，含 `playUrl` | **HLS 可播** |
-| 直播间详情 | `GET live.ximalaya.com/lamia/v12/live/room?roomId=` | 200；无推流字段 | **未找到推流** |
+| 直播间详情 | `GET live.ximalaya.com/lamia/v12/live/room?roomId=` | 200；详情含 `recordInfo.id`（即 liveId） | — |
+| 直播推流 | `GET live.ximalaya.com/lamia-authorize-web/play?liveId=` | 200；返回 `aacUrls` / `tsUrls` / `flvUrls`；HLS 分片 200 `video/mp2t` | **可播** |
 | 听单详情 | — | **未找到** | 不可用 |
 | 专辑详情 | `GET www.ximalaya.com/revision/album?albumId=` | 200；简介 / 主播 / 播放量 / 首屏 30 集 | 可播 |
 | 播放地址 | `GET mobile.ximalaya.com/v1/track/baseInfo?trackId=` | 200；`playUrl64/32` | 已验证 |
@@ -368,7 +369,7 @@ GET https://www.ximalaya.com/revision/user?uid=1266964
 
 ## 7. 广播
 
-> 结论：**电台（radio）可播**，直播间（liveroom）推流未找到。
+> 结论：**电台（radio）与直播间（liveroom）均可播**；直播间需要 `liveId`（房间详情里的 `recordInfo.id`），不是 `roomId`。
 
 ### 7.1 电台首页（含播放地址）
 
@@ -444,16 +445,50 @@ GET https://live.ximalaya.com/lamia/v12/live/room?roomId=382985
 - `userInfo`：`uid` `nickname` `avatar` `description` `isFollowed`
 - `chatRoomVo`、`fansClubVo`、`rankInfos` 等
 
-**没有推流地址字段**。直播间 H5（`https://m.ximalaya.com/gatekeeper/live-room-h5?roomId=…`）只请求该详情接口，随后跳转 `iting://open?msg_type=52&live_type=0&liveroom_id=…`（App 内协议）。
+**详情里没有推流地址**，推流需要第二个接口，且参数是 `liveId`（不是 `roomId`）：
 
-已尝试且全部失败（404 / 空）：
+```
+GET https://live.ximalaya.com/lamia-authorize-web/play?liveId=35021290
+```
+
+实测响应（`roomId=382985` 对应 `liveId=35021290`）：
+
+```json
+{
+  "ret": 0,
+  "data": {
+    "aacUrls": ["http://live.lamia.hw.l1.xmcdn.com/live/382985-35021290/playlist.m3u8"],
+    "flvUrls": ["http://live.lamia.hw.l1.xmcdn.com/live/382985-35021290.flv"],
+    "flvUrls2": ["https://livelamiahwl1.xmcdn.com/live/382985-35021290.flv"],
+    "tsUrls": ["https://livelamiahwl1.xmcdn.com/live/382985-35021290.m3u8"],
+    "tsUrls2": ["https://livelamiahwl1.xmcdn.com/live/382985-35021290.m3u8"]
+  }
+}
+```
+
+端到端验证：
+
+1. `https://livelamiahwl1.xmcdn.com/live/382985-35021290.m3u8` → 200，master playlist，指向 CDN 子播放列表。
+2. 子播放列表 → 200，含相对分片 `382985-35021290_N.ts?vhost=…`。
+3. 解析相对路径取首片 → 200，`Content-Type: video/mp2t`，首字节 `0x47`（TS 同步字节）。
+
+两个直播间均验证通过：`liveId=35021290`（room 382985）与 `liveId=35021678`（room 9692945）。
+
+**为什么一开始没找到**：`/lamia/v12/live/room` 只返回房间信息，不含流地址；直播间 H5（`https://m.ximalaya.com/gatekeeper/live-room-h5?roomId=…`）抓到的是详情请求，随后就跳 `iting://open?msg_type=52&live_type=0&liveroom_id=…`，**H5 本身不播**。推流接口是在 H5 的 `vendor` 包里发现（`getAudioPlayPath: GET /lamia-authorize-web/play`），再用 `liveId` 调通的。
+
+以下路径确实不存在（已排除）：
 
 - `live.ximalaya.com/live-web/v1/getLiveInfo|getLiveStream|getLiveStreamUrl|getLiveUrl|room|getRoomInfo|...`
 - `live.ximalaya.com/lamia/v12/live/room/list`、`/lamia/v1/live/recommend/room/list`
 - `mobile.ximalaya.com/mobile/discovery/v1/live/list`
 - `live.ximalaya.com/radio-first-page-app/live/{roomId}/64.m3u8`（返回 `ret 2011`）
 
-结论：**直播间推流协议无法从公开 Web / 接口侧确认**；H5 不提供播放器，只做 App 唤起。需要官方 APK 进一步分析（见 §9）。
+实现约束：
+
+- 必须先用房间详情拿 `recordInfo.id` 作为 `liveId`，再请求推流；直接用 `roomId` 调 `/lamia-authorize-web/play` 返回 **500**。
+- 直播只能用 HLS/FLV，不支持进度、倍速、跳过头尾。
+- 建议优先取 `tsUrls[0]`（HTTPS）；`aacUrls[0]` 为 HTTP，需升级或仅在不支持 TS 时使用。
+- 播放前用 `recordInfo.alive` / `status` 判断是否在播。
 
 ---
 
@@ -486,9 +521,10 @@ GET https://www.ximalaya.com/revision/album?albumId=70781065
 
 ## 9. 未解决 / 未验证
 
+> 直播推流已解决（见 §7.5），不再列为风险；以下为仍未闭环或未验证的项。
+
 | 项 | 状态 | 已尝试 | 影响 |
 |---|---|---|---|
-| 直播间推流 | **未解决** | §7.5 列出的路径、H5 抓包、Mac 客户端代码 | 广播 tab 若含直播间，无法播放 |
 | 听单详情 | **未解决** | `specialId=1283` 在 `mobile/v1/special/album/list`、`/revision/topic/detailSpecial`、`/m-revision/page/column/*` 均失败/无数据 | 推荐页「精品听单」模块只能隐藏 |
 | 个性化效果 | **未验证** | 匿名请求无法验证；无账号 Cookie | 「个性化开关」只能按“是否携带身份”实现并标注未验证 |
 | `focus` / `square` / `recommendAlbum` / `ad` 内容 | **未验证** | 匿名 + `includeActivity/includeSpecial` 四种组合均为空 | 只能按白名单渲染，不能假设字段 |
@@ -505,7 +541,7 @@ GET https://www.ximalaya.com/revision/album?albumId=70781065
 3. **分类排序只有 3 个**：综合 / 最近更新 / 最多播放；筛选用 `metas` 动态渲染。
 4. **榜单不做分页**（一次 97–100 条），类目切换用 `queryRankClusterDetail` 的 `categoryCode`。
 5. **主播**：列表用 `anchorInfluence` 的 6 个子榜；详情用 `/revision/user/basic` + `/revision/user`（最多 15 张专辑）。
-6. **广播改为“电台”优先**：`homePage` + `playUrl.aac64` 可播；直播间只能展示，不能播。若必须播放，需继续逆向 APK。
+6. **广播可以同时做「电台 + 直播间」**：直播间先用详情拿 `recordInfo.id`，再调 `lamia-authorize-web/play?liveId=` 取 HLS；电台用 `homePage` + `playUrl.aac64`。
 7. **听单模块隐藏**（`playlist`）；不要给不可用入口。
 8. **专辑页可补全元数据**：`/revision/album` 提供主播、简介、播放量、首屏 30 集。
 
@@ -521,7 +557,10 @@ GET https://www.ximalaya.com/revision/album?albumId=70781065
 | 16:39 | `GET live.ximalaya.com/radio-first-page-app/live/267/64.m3u8` | 200，`ret=2011 电台流获取失败` |
 | 16:44 | Playwright 打开 `www.ximalaya.com/zhubo/1266964` | 请求 `/revision/user/basic?uid=`、`/revision/user?uid=` |
 | 16:45 | `GET www.ximalaya.com/revision/user?uid=1266964` | 200，`pubPageInfo.totalCount=120`，列表 15 条 |
-| 16:46 | Playwright 打开直播间 H5 | 请求 `m.ximalaya.com/lamia/v12/live/room?roomId=`，随后 `iting://` |
+| 16:46 | Playwright 打开直播间 H5 | 请求 `m.ximalaya.com/lamia/v12/live/room?roomId=`，随后 `iting://`；H5 不播 |
+| 16:58 | `GET live.ximalaya.com/lamia-authorize-web/play?liveId=35021290` | 200，返回 aac/flv/ts 四组地址 |
+| 16:58 | `GET livelamiahwl1.xmcdn.com/live/382985-35021290.m3u8` | 200，master playlist |
+| 16:59 | 子播放列表 + 首片 `.ts` | 200，`video/mp2t`，首字节 `0x47` |
 | 16:47 | `GET www.ximalaya.com/revision/explore/v2/getRecommend` | 200，5 卡片，23–31 条/卡 |
 | 16:47 | `GET m.ximalaya.com/m-revision/page/rank/queryRankCluster` | 200，6 个榜单 |
 | 16:48 | `GET m.ximalaya.com/m-revision/page/rank/queryRankClusterDetail` | 200，热播榜 27 类目 |
@@ -568,9 +607,13 @@ curl -sS --compressed -A 'ting_9.4.74.3(Android)' \
 curl -sS -A 'ting_9.4.74.3(Android)' \
   'https://live.ximalaya.com/radio-first-page-app/live/328/64.m3u8'
 
-# 直播间详情（无推流）
+# 直播间详情（拿到 recordInfo.id）
 curl -sS --compressed -A 'ting_9.4.74.3(Android)' \
   'https://live.ximalaya.com/lamia/v12/live/room?roomId=382985'
+
+# 直播推流（参数是 liveId，不是 roomId）
+curl -sS --compressed -A 'ting_9.4.74.3(Android)' \
+  'https://live.ximalaya.com/lamia-authorize-web/play?liveId=35021290'
 
 # 专辑详情 + 播放地址
 curl -sS --compressed -A 'Mozilla/5.0' \

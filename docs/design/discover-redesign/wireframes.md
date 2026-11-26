@@ -34,7 +34,7 @@
 | 分类树 | `www.ximalaya.com/revision/category/allCategoryInfo`；`.../breadcrumbCategoryInfo?categoryId=9` | 5 个分组 / 28 个内容分类；breadcrumb 返回 **29 个分类（含党员学习园地）及 `pinyin`** | 分类导航必须用 `pinyin`（`lishi`），`name`（`culture`）无效 |
 | 分类结果 | `m.ximalaya.com/m-revision/page/category/queryCategoryPage` + `.../queryCategoryAlbumsByPage` | 200；子类 24 个；`page` 生效；`sort=0/1/2`；`metas=维度_值-维度_值` 生效 | 可用，支持分页 + 排序 + 筛选 |
 | 广播（电台） | `live.ximalaya.com/radio-first-page-app/homePage` | 200；3 模块 / 27 个电台，每个电台带 `playUrl.aac24/aac64` | **HLS 可播**（已抽测 5 个电台） |
-| 广播（直播间） | 推荐流 `live` 模块（固定 3 条）；`/lamia/v12/live/room?roomId=` | 房间详情 200，但**无推流字段**；H5 只跳 `iting://` | 直播间只能展示，不能播 |
+| 广播（直播间） | 推荐流 `live` 模块（固定 3 条）；`/lamia/v12/live/room?roomId=`；`/lamia-authorize-web/play?liveId=` | 房间详情 200，`recordInfo.id` 即 `liveId`；推流接口返回 `tsUrls/aacUrls/flvUrls`，抽测两个房间 HLS 分片均 200 | **可播**（用 `liveId`，不是 `roomId`） |
 | 榜单 | `m.ximalaya.com/m-revision/page/rank/queryRankCluster`、`.../queryRankClusterDetail`、`.../queryRank` | 6 个榜单；热播榜 27 类目；`clusterCode=hotplay&categoryCode=all` 返回 97 条 | 可用；不做分页 |
 | 主播 | `.../rank/queryRank?clusterCode=anchorInfluence&categoryCode=voiceActor74` | 6 个子榜，每榜最多 100 位；`/revision/user?uid=` 返回 15 张专辑（总数 120，**无分页**） | 列表/详情可用；专辑最多展示 15 张 |
 | 听单 | 推荐流 `playlist`（`specialId`） | 详情接口全部失败 | **隐藏该模块** |
@@ -594,13 +594,13 @@
 
 | ID | 问题 | 决策 | 实测结果 / 对设计的影响 |
 |---|---|---|---|
-| Q1 | 广播推流地址未找到 | **限时逆向直播协议** | **直播推流仍未找到**：房间详情 `lamia/v12/live/room` 无推流字段，H5 只跳 `iting://`；但**电台** `radio-first-page-app/homePage` 返回 27 个电台且 `playUrl.aac64` 为有效 HLS。广播 tab 可改为「电台」实现播放；直播间只能展示 |
+| Q1 | 广播推流地址未找到 | **限时逆向直播协议** | **已解决**：电台 `homePage` 的 `playUrl.aac64` 可播；直播间先取 `recordInfo.id`，再调 `lamia-authorize-web/play?liveId=` 取 HLS，两房间已端到端验证 |
 | Q2 | 主播列表接口未找到 | **继续找官方接口** | **已找到**：`queryRank?clusterCode=anchorInfluence&categoryCode=voiceActor74` 等 6 个子榜，每榜最多 100 位；详情用 `/revision/user/basic` + `/revision/user`（最多 15 张专辑） |
 | Q3 | 个性化开关默认值 | **默认开启**（登录后生效，可关闭） | 接口无显式 opt-out；匿名态无法验证个性化效果，只能按「是否携带身份」实现并标注未验证 |
 | Q4 | 听单详情接口未验证 | 先验证；失败则整块不渲染 | **验证失败**：`specialId` 无可用详情接口 → 推荐页不渲染 `playlist` 模块 |
 
 > 线框已批准进入 Stage 3，视觉规格见 `visual-spec.md`；接口细节与复现命令见 `api-spec.md`。
-> 广播范围（电台 vs 直播间）需重新确认后，再修订 W-04/W-05。
+> 直播间推流已验证（`recordInfo.id` → `lamia-authorize-web/play?liveId=`），广播 tab 可同时包含电台与直播间，W-04/W-05 无需缩减范围。
 
 ---
 
