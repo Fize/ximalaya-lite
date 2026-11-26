@@ -37,6 +37,8 @@ dependencies {
     implementation("androidx.navigation3:navigation3-ui:1.2.0")
     implementation("androidx.compose.material3:material3")
     implementation("androidx.media3:media3-exoplayer:1.10.1")
+    // HLS (radio + live rooms) lives in a separate artifact.
+    implementation("androidx.media3:media3-exoplayer-hls:1.10.1")
     implementation("androidx.media3:media3-datasource-okhttp:1.10.1")
     implementation("androidx.media3:media3-session:1.10.1")
     implementation("org.jetbrains.kotlinx:kotlinx-coroutines-android:1.11.0")

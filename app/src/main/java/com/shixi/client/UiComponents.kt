@@ -83,8 +83,8 @@ enum class AppIcon(val path: String) {
         }
     }
 }
-@Composable fun CoverArtwork(url: String?, modifier: Modifier = Modifier) {
-    Surface(modifier.clip(RoundedCornerShape(12.dp)), color = MaterialTheme.colorScheme.surfaceContainer) {
+@Composable fun CoverArtwork(url: String?, modifier: Modifier = Modifier, shape: androidx.compose.ui.graphics.Shape = RoundedCornerShape(12.dp)) {
+    Surface(modifier.clip(shape), color = MaterialTheme.colorScheme.surfaceContainer) {
         SubcomposeAsyncImage(model = url?.takeIf { it.isNotBlank() }, contentDescription = null,
             contentScale = ContentScale.Crop, modifier = Modifier.fillMaxSize(),
             loading = { Box(Modifier.fillMaxSize(), contentAlignment = Alignment.Center) { AppSymbol(AppIcon.Headphones) } },
@@ -204,49 +204,6 @@ val LocalFeedbackHost = staticCompositionLocalOf<SnackbarHostState> { error("Fee
         else items(albums.take(4), key = { "follow-${it.id}" }) { item -> AlbumLine(item, if (subscriptions.any { it.id == item.id }) null else "仅本机") { onAlbum(item) } }
     } }
 }
-@Composable fun DiscoveryScreen(store: DiscoveryStore, onSearch: () -> Unit, onAlbum: (Item) -> Unit) {
-    var topic by rememberSaveable { mutableStateOf(DiscoveryStore.topics.first()) }
-    val cached by store.state.collectAsState()
-    val current = cached[topic] ?: DiscoveryPage()
-    val scrolls = DiscoveryStore.topics.map { rememberLazyGridState() }
-    val scroll = scrolls[DiscoveryStore.topics.indexOf(topic)]
-    LaunchedEffect(topic) { store.ensure(topic) }
-    val latest by rememberUpdatedState(current)
-    LaunchedEffect(topic, scroll) {
-        snapshotFlow {
-            val layout = scroll.layoutInfo
-            scroll.isScrollInProgress && latest.loaded && latest.more && !latest.busy &&
-                latest.error.isEmpty() && layout.visibleItemsInfo.lastOrNull()?.index?.let {
-                    it >= layout.totalItemsCount - 3
-                } == true
-        }.collect { nearEnd -> if (nearEnd) store.next(topic) }
-    }
-    if (current.error.isNotEmpty() && current.rows.isNotEmpty()) FloatingNotice("更新失败，请稍后重试") { if (current.failedPage > 1) store.next(topic) else store.refresh(topic) }
-    RefreshContent(current.refreshing, { store.refresh(topic) }, Modifier.fillMaxSize()) {
-        LazyVerticalGrid(columns = GridCells.Adaptive(148.dp), state = scroll, horizontalArrangement = Arrangement.spacedBy(16.dp), verticalArrangement = Arrangement.spacedBy(24.dp), contentPadding = PaddingValues(bottom = 24.dp)) {
-            item(span = { GridItemSpan(maxLineSpan) }) { Column {
-                PageHeading("发现", onSearch = onSearch)
-                Row(Modifier.fillMaxWidth().horizontalScroll(rememberScrollState()), horizontalArrangement = Arrangement.spacedBy(8.dp)) {
-                    DiscoveryStore.topics.forEach { value -> FilterChip(selected = topic == value, onClick = { topic = value }, label = { Text(value) }, border = null, colors = FilterChipDefaults.filterChipColors(containerColor = MaterialTheme.colorScheme.surfaceContainer, selectedContainerColor = MaterialTheme.colorScheme.primaryContainer, selectedLabelColor = MaterialTheme.colorScheme.primary)) }
-                }
-                Spacer(Modifier.height(20.dp)); SectionHeading("发现专辑")
-                if (current.busy && !current.refreshing) LinearProgressIndicator(Modifier.fillMaxWidth().padding(vertical = 12.dp))
-                if (current.error.isNotEmpty() && current.rows.isEmpty()) InlineNotice("加载失败，${if (current.rows.isEmpty()) "请重试" else "已保留上次内容"}") { if (current.failedPage > 1) store.next(topic) else store.refresh(topic) }
-                else if (!current.busy && current.loaded && current.rows.isEmpty()) Text("暂无专辑，换个分类看看", style = MaterialTheme.typography.bodyMedium)
-            } }
-            items(current.rows, key = { it.id }) { item -> AlbumCard(item) { onAlbum(item) } }
-            item(span = { GridItemSpan(maxLineSpan) }) {
-                Box(Modifier.fillMaxWidth().heightIn(min = 48.dp), contentAlignment = Alignment.Center) {
-                    when {
-                        current.busy && current.loaded && !current.refreshing -> CircularProgressIndicator(Modifier.size(20.dp), strokeWidth = 2.dp)
-                        current.error.isNotEmpty() && current.failedPage > 1 -> TextButton(onClick = { store.next(topic) }) { Text("加载失败，点击重试") }
-                        current.loaded && !current.more && current.rows.isNotEmpty() -> Text("已显示全部内容", style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
-                    }
-                }
-            }
-        }
-    }
-}
 enum class SyncViewState { SIGNED_OUT, UNCHECKED, SYNCING, SYNCED, PENDING, ERROR, EXPIRED }
 /** Adapt the existing CloudSync message contract centrally; unknown outcomes stay visible. */
 fun syncViewState(cloud: CloudState): SyncViewState = when {
@@ -359,6 +316,17 @@ fun speedText(speed: Float): String = java.math.BigDecimal.valueOf(speed.toDoubl
         if (onClick != null) Text("›", modifier = Modifier.clearAndSetSemantics {}, color = MaterialTheme.colorScheme.onSurfaceVariant, style = MaterialTheme.typography.titleLarge)
     }
 }
+@Composable private fun SettingSwitchRow(title: String, supporting: String, checked: Boolean, enabled: Boolean = true, onChange: (Boolean) -> Unit) {
+    Row(Modifier.fillMaxWidth().heightIn(min = 60.dp).padding(horizontal = 16.dp, vertical = 12.dp),
+        verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(12.dp)) {
+        Column(Modifier.weight(1f), verticalArrangement = Arrangement.spacedBy(2.dp)) {
+            Text(title, style = MaterialTheme.typography.bodyLarge)
+            if (supporting.isNotBlank()) Text(supporting, style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
+        }
+        Switch(checked = checked, onCheckedChange = onChange, enabled = enabled)
+    }
+}
+
 @Composable private fun SettingsGroup(title: String, content: @Composable ColumnScope.() -> Unit) {
     Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
         Text(title, Modifier.padding(start = 4.dp), style = MaterialTheme.typography.labelLarge, color = MaterialTheme.colorScheme.onSurfaceVariant)
@@ -368,6 +336,7 @@ fun speedText(speed: Float): String = java.math.BigDecimal.valueOf(speed.toDoubl
 @Composable fun SettingsScreen(account: String, speed: Float, ready: Boolean, cacheMessage: String, clearingCache: Boolean, version: String,
     onBack: () -> Unit, onAccount: () -> Unit, onSpeed: () -> Unit, onSleep: () -> Unit, onClearCache: () -> Unit,
     cloud: CloudState = CloudState(), cloudVisible: Boolean = false, onSync: () -> Unit = {}, sleep: String = "关闭",
+    personalized: Boolean = true, personalizedAvailable: Boolean = true, onPersonalized: (Boolean) -> Unit = {},
     membership: MembershipStatus = MembershipStatus.SignedOut, onMembership: () -> Unit = {}) {
     if (cacheMessage.isNotEmpty()) FloatingNotice(cacheMessage)
     val accountLabel = accountStatusText(account)
@@ -393,6 +362,19 @@ fun speedText(speed: Float): String = java.math.BigDecimal.valueOf(speed.toDoubl
                 SettingRow("播放速度", speedText(speed), AppIcon.Speed, enabled = ready, onClick = onSpeed)
                 HorizontalDivider(Modifier.padding(horizontal = 16.dp), color = MaterialTheme.colorScheme.outlineVariant)
                 SettingRow("定时停止", sleep, AppIcon.Timer, enabled = ready, onClick = onSleep)
+            } }
+            item { SettingsGroup("内容偏好") {
+                SettingSwitchRow(
+                    title = "个性化推荐",
+                    supporting = when {
+                        !personalizedAvailable -> "登录后可开启个性化推荐"
+                        personalized -> "按收听记录推荐专辑和主播"
+                        else -> "关闭后使用通用热门内容"
+                    },
+                    checked = personalized,
+                    enabled = personalizedAvailable,
+                    onChange = onPersonalized,
+                )
             } }
             item { SettingsGroup("存储与关于") {
                 SettingRow("清理封面缓存", if (clearingCache) "清理中…" else "", AppIcon.Clean, enabled = !clearingCache, onClick = onClearCache)

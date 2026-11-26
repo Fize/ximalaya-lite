@@ -153,6 +153,8 @@ class PlaybackService : MediaSessionService() {
             putLong("listeningTrack", lastListeningEvent?.id ?: 0)
             putLong("listeningAt", lastListeningEvent?.updatedAt ?: 0)
             putBoolean("storageReady", storageReady)
+            putBoolean("liveMode", PlaybackItems.isLive(engine.currentMediaItem))
+            putString("liveKey", PlaybackItems.liveKey(engine.currentMediaItem))
             putString("durationMediaId", engine.currentMediaItem?.mediaId.orEmpty())
             putLong("durationMs", knownDuration())
             putLong("manualSeekTrack", manualSeekTrack)
@@ -167,6 +169,8 @@ class PlaybackService : MediaSessionService() {
     }
     private fun snapshot() {
         if (!::engine.isInitialized || !storageReady) return
+        // Live has no queue/timeline; keep the last album snapshot restorable.
+        if (PlaybackItems.isLive(engine.currentMediaItem)) { extras(); return }
         snapshotAt = SystemClock.elapsedRealtime(); snapshotRevision++
         // Gapless transitions can keep isPlaying=true without a second state-change callback.
         if (engine.isPlaying) engine.currentMediaItem?.let(PlaybackItems::item)?.let {
@@ -203,7 +207,18 @@ class PlaybackService : MediaSessionService() {
         val accounts = AccountManager.get(this)
         val content = AccountContentApi(this)
         catalogue = PlaybackCatalogue(content::tracks)
-        val resolver = PlaybackResolver(catalogue::tracks, content::resolve, owner = accounts::contentIdentity)
+        val discoveryApi = com.shixi.protocol.DiscoveryApi()
+        val resolver = PlaybackResolver(catalogue::tracks, content::resolve, owner = accounts::contentIdentity,
+            liveAddress = { kind, id, extra ->
+                val url = when (kind) {
+                    "room" -> discoveryApi.liveStream(extra)
+                    "radio" -> discoveryApi.radioHome().modules.asSequence()
+                        .flatMap { it.stations.asSequence() }.firstOrNull { it.id == id }?.streamUrl.orEmpty()
+                    else -> ""
+                }
+                if (url.isBlank()) throw java.io.IOException("直播流暂不可用")
+                url
+            })
         // Keep media traffic separate from the account client. HTTPS cannot downgrade
         // on redirects; OkHttp reuses healthy connections and races available routes.
         val mediaHttp = OkHttpClient.Builder().connectTimeout(12, TimeUnit.SECONDS)
@@ -225,7 +240,10 @@ class PlaybackService : MediaSessionService() {
             }.build()
         val http = OkHttpDataSource.Factory(mediaHttp)
         val source = ResolvingDataSource.Factory(DefaultDataSource.Factory(this, http)) { spec ->
-            try { spec.withUri(resolver.resolve(spec.uri)) }
+            // Only our own opaque URIs need resolution; HLS child playlists and segments
+            // arrive as absolute https URLs and must pass through untouched.
+            if (spec.uri.scheme != "shixi") spec
+            else try { spec.withUri(resolver.resolve(spec.uri)) }
             catch (failure: PlaybackAccessException) { throw failure }
             catch (failure: com.shixi.protocol.ContentAccessException) { throw failure }
             catch (_: Exception) { throw IOException("无法获取播放地址") }
@@ -263,6 +281,8 @@ class PlaybackService : MediaSessionService() {
             override fun handleStop(): ListenableFuture<*> { if (!storageReady) return unavailable(); recovery.cancel(); albumQueue.cancelIntent(); return super.handleStop() }
             override fun handleSeek(mediaItemIndex: Int, positionMs: Long, seekCommand: Int): ListenableFuture<*> {
                 if (!storageReady) return unavailable()
+                // Live HLS has no timeline; ignore seeks instead of queuing album moves.
+                if (PlaybackItems.isLive(engine.currentMediaItem)) return Futures.immediateVoidFuture()
                 recovery.userIntent(); albumQueue.cancelIntent()
                 if (seekCommand == Player.COMMAND_SEEK_TO_PREVIOUS || seekCommand == Player.COMMAND_SEEK_TO_PREVIOUS_MEDIA_ITEM) {
                     albumQueue.move(-1); return Futures.immediateVoidFuture()

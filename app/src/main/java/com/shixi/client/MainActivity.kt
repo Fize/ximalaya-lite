@@ -92,7 +92,7 @@ class MainActivity : ComponentActivity() {
                 val api = remember { ContentApi() }
                 val content = remember { AccountContentApi(this@MainActivity) }
                 val membershipApi = remember { MembershipApi(this@MainActivity) }
-                val discovery = remember { DiscoveryStore.get(this@MainActivity) }
+                val discovery = remember { DiscoveryRepository.get(this@MainActivity) }
                 var query by rememberSaveable { mutableStateOf("") }
                 var searchMessage by rememberSaveable { mutableStateOf("输入关键词搜索专辑") }
                 var message by rememberSaveable { mutableStateOf("输入关键词搜索专辑") }
@@ -118,6 +118,12 @@ class MainActivity : ComponentActivity() {
                 var albumEntries by rememberSaveable { mutableStateOf(arrayListOf<Item>()) }
                 val albumsByTab = rememberSaveable(saver = Saver(save = { HashMap(it) }, restore = { saved -> mutableStateMapOf<Int, Item>().apply { putAll(saved) } })) { mutableStateMapOf<Int, Item>() }
                 val tracksByTab = rememberSaveable(saver = Saver<androidx.compose.runtime.snapshots.SnapshotStateMap<Int, List<Item>>, HashMap<Int, ArrayList<Item>>>(save = { HashMap(it.mapValues { entry -> ArrayList(entry.value) }) }, restore = { saved -> mutableStateMapOf<Int, List<Item>>().apply { putAll(saved) } })) { mutableStateMapOf<Int, List<Item>>() }
+                val categoryByTab = rememberSaveable(saver = Saver(save = { HashMap(it) }, restore = { saved -> mutableStateMapOf<Int, String>().apply { putAll(saved) } })) { mutableStateMapOf<Int, String>() }
+                val anchorByTab = rememberSaveable(saver = Saver(save = { HashMap(it) }, restore = { saved -> mutableStateMapOf<Int, Long>().apply { putAll(saved) } })) { mutableStateMapOf<Int, Long>() }
+                val liveByTab = rememberSaveable(saver = Saver(save = { HashMap(it) }, restore = { saved -> mutableStateMapOf<Int, Long>().apply { putAll(saved) } })) { mutableStateMapOf<Int, Long>() }
+                val preferenceStore = remember { ContentPreferenceStore.get(this@MainActivity) }
+                var personalized by remember { mutableStateOf(preferenceStore.personalized) }
+                var recommendVersion by remember { mutableIntStateOf(0) }
                 var reversed by rememberSaveable { mutableStateOf(false) }
                 var searchPage by rememberSaveable { mutableIntStateOf(1) }
                 var albumRequestNext by remember { mutableStateOf(false) }
@@ -266,8 +272,29 @@ class MainActivity : ComponentActivity() {
                             val scroll = albumScrolls[tab]; scope.launch { scroll.scrollToItem(saved.index, saved.offset) }
                         }
                     } else if (popped == "album-$tab") { cancelRequest(); album = null; albumsByTab.remove(tab); tracksByTab.remove(tab) }
+                    else if (popped == "discover-category-$tab") categoryByTab.remove(tab)
+                    else if (popped == "discover-anchor-$tab") anchorByTab.remove(tab)
+                    else if (popped == "discover-live-$tab") liveByTab.remove(tab)
                 }
                 fun openSearch() { cancelPlaybackIntent(); if (stack.lastOrNull() != "search-$tab") stack.add("search-$tab") }
+                androidx.activity.compose.BackHandler(enabled = stack.size > 1) { navigateBack() }
+                fun albumItem(brief: com.shixi.protocol.AlbumBrief): Item = Item(brief.albumId, brief.title, cover = brief.cover)
+                fun openDiscoverCategory(code: String) { if (code.isBlank()) return; categoryByTab[tab] = code; if (stack.lastOrNull() != "discover-category-$tab") stack.add("discover-category-$tab") }
+                fun openDiscoverAnchor(uid: Long) { if (uid <= 0) return; anchorByTab[tab] = uid; if (stack.lastOrNull() != "discover-anchor-$tab") stack.add("discover-anchor-$tab") }
+                fun openDiscoverLive(roomId: Long) { if (roomId <= 0) return; liveByTab[tab] = roomId; if (stack.lastOrNull() != "discover-live-$tab") stack.add("discover-live-$tab") }
+                fun playLiveMedia(kind: String, id: Long, extra: Long, title: String, subtitle: String, cover: String) {
+                    val player = controller
+                    if (player == null || !storageReady) { message = "正在准备播放器…"; return }
+                    if (id <= 0 || extra <= 0) { message = "暂时无法打开该直播，请重试"; return }
+                    cancelPlaybackIntent()
+                    player.setMediaItem(PlaybackItems.live(kind, id, extra, title, subtitle, cover), 0L)
+                    player.prepare()
+                    player.play()
+                }
+                fun playRadio(station: com.shixi.protocol.RadioStation) {
+                    if (station.streamUrl.isBlank()) { message = "该电台暂不可播放"; return }
+                    playLiveMedia("radio", station.id, 64L, station.name, station.programName.ifBlank { "电台" }, station.cover)
+                }
                 fun openPlayer() {
                     sheet = null
                     if (stack.contains("player-$tab")) { while (stack.lastOrNull() != "player-$tab") navigateBack() }
@@ -567,7 +594,40 @@ class MainActivity : ComponentActivity() {
                         }
                         SettingsScreen(accountState.status, playbackSpeed, storageReady && controller != null, cacheMessage, clearingCache, versionName,
                             ::navigateBack, ::openAccount, { sheet = "speed" }, { sheet = "sleep" }, ::clearCovers, cloudState, cloudVisible, { refreshLibrary() }, sleepLabel,
-                            membership, { membershipAttempt++ })
+                            membership = membership, onMembership = { membershipAttempt++ },
+                            personalized = personalized, personalizedAvailable = accountState.signedIn,
+                            onPersonalized = { value ->
+                                preferenceStore.personalized = value
+                                personalized = value
+                                scope.launch {
+                                    discovery.clearRecommend()
+                                    recommendVersion++
+                                }
+                            })
+                    } else if (key == "discover-category-$tab") {
+                        Box(Modifier.fillMaxSize().padding(padding).padding(horizontal = 20.dp)) {
+                            DiscoverCategoryPage(discovery, categoryByTab[tab].orEmpty(), { openAlbum(albumItem(it)) }, ::navigateBack)
+                        }
+                    } else if (key == "discover-anchor-$tab") {
+                        Box(Modifier.fillMaxSize().padding(padding).padding(horizontal = 20.dp)) {
+                            val uid = anchorByTab[tab]
+                            if (uid == null) EmptyBlock("主播不存在", actionLabel = "返回") { navigateBack() }
+                            else DiscoverAnchorDetail(discovery, uid, ::navigateBack) { openAlbum(albumItem(it)) }
+                        }
+                    } else if (key == "discover-live-$tab") {
+                        Box(Modifier.fillMaxSize().padding(padding)) {
+                            val roomId = liveByTab[tab]
+                            if (roomId == null) EmptyBlock("直播间不存在", actionLabel = "返回") { navigateBack() }
+                            else DiscoverLiveRoom(discovery, roomId, ::navigateBack,
+                                playing = playbackState == "正在直播" && controller?.playWhenReady == true &&
+                                    controller?.sessionExtras?.getString("liveKey").orEmpty().startsWith("live:room:$roomId:"),
+                                onToggle = { room ->
+                                    val thisRoomPlaying = playbackState == "正在直播" && controller?.playWhenReady == true &&
+                                        controller?.sessionExtras?.getString("liveKey").orEmpty() == "live:room:${room.roomId}:${room.liveId}"
+                                    if (thisRoomPlaying) controller?.pause()
+                                    else playLiveMedia("room", room.roomId, room.liveId, room.name, room.anchor, room.cover)
+                                })
+                        }
                     } else Column(Modifier.fillMaxSize().padding(padding).padding(horizontal = 20.dp)) {
                         AccessFeedback()
                         if (connectionFailed) FloatingNotice("播放器连接失败", "重试") { recreate() }
@@ -581,15 +641,30 @@ class MainActivity : ComponentActivity() {
                                 }
                             }
                             RefreshContent(loading && albumEntries.isNotEmpty(), { if (!loading) album?.let { openAlbum(it, refresh = true) } }, Modifier.fillMaxSize()) {
+                            var albumMeta by remember(album?.id) { mutableStateOf<com.shixi.protocol.AlbumDetail?>(null) }
+                            LaunchedEffect(album?.id) {
+                                albumMeta = album?.id?.let { id -> runCatching { discovery.albumDetail(id) }.getOrNull() }
+                            }
                             LazyColumn(state = albumScrolls[tab], modifier = Modifier.fillMaxSize()) {
                                 item(key = "album-header") {
                                     Row(Modifier.heightIn(min = 56.dp), verticalAlignment = Alignment.CenterVertically) { SymbolButton(AppIcon.Back, "返回", onClick = ::navigateBack); Text("专辑", Modifier.weight(1f), style = MaterialTheme.typography.titleMedium); SymbolButton(AppIcon.More, "专辑更多操作") { sheet = "album-actions" } }
                                     Row(verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(14.dp)) {
                                         CoverArtwork(album?.cover, Modifier.size(112.dp))
-                                        Column(Modifier.weight(1f)) {
+                                        Column(Modifier.weight(1f), verticalArrangement = Arrangement.spacedBy(4.dp)) {
                                             Text(album?.title.orEmpty(), style = MaterialTheme.typography.titleLarge)
-                                            if (cloudVisible) TextButton(onClick = { album?.let { cloudSync.toggle(it) } }) { Text(if (cloudState.subscriptions.any { it.id == album?.id && it.subscribed }) "已订阅" else "订阅") }
-                                            else TextButton(onClick = { album?.let { localStore.toggleFollow(it) } }) { Text(if (followed.any { it.id == album?.id }) "已收藏 · 本机" else "收藏到本机") }
+                                            albumMeta?.let { meta ->
+                                                val line = listOfNotNull(
+                                                    meta.anchorName.takeIf { it.isNotBlank() },
+                                                    meta.playCount?.let { "${formatCount(it)}播放" },
+                                                    meta.trackCount?.let { "${it}集" },
+                                                ).joinToString(" · ")
+                                                if (line.isNotBlank()) Text(line, style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant, maxLines = 1, overflow = TextOverflow.Ellipsis)
+                                            }
+                                            Row(verticalAlignment = Alignment.CenterVertically) {
+                                                CompactAction("播放", enabled = albumEntries.isNotEmpty()) { albumEntries.firstOrNull()?.let { startTrack(it) } }
+                                                if (cloudVisible) TextButton(onClick = { album?.let { cloudSync.toggle(it) } }) { Text(if (cloudState.subscriptions.any { it.id == album?.id && it.subscribed }) "已订阅" else "订阅") }
+                                                else TextButton(onClick = { album?.let { localStore.toggleFollow(it) } }) { Text(if (followed.any { it.id == album?.id }) "已收藏 · 本机" else "收藏到本机") }
+                                            }
                                         }
                                     }
                                     Spacer(Modifier.height(20.dp))
@@ -642,7 +717,18 @@ class MainActivity : ComponentActivity() {
                                     { selectTrack(it.item()) }, { openAlbum(it) }, { libraryFilter = "订阅"; switchTab(2) }, { switchTab(1) }, ::openSettings, ::openSearch, controller?.playWhenReady == true, pendingTrackId, { if (live) togglePlayback() else recent?.let { playTrack(it.item()) } },
                                     if (cloudVisible) cloudState.subscriptions.filter { it.subscribed }.map { it.item() } else emptyList(), cloudVisible && cloudState.refreshing, { refreshLibrary() }, { moreTrack = it.item(); sheet = "more" }, { libraryFilter = "历史"; switchTab(2) })
                                 }
-                                1 -> DiscoveryScreen(discovery, ::openSearch) { openAlbum(it) }
+                                1 -> DiscoverScreen(discovery, ::openSearch,
+                                    onAlbum = { openAlbum(albumItem(it)) },
+                                    onCategory = ::openDiscoverCategory,
+                                    onAnchor = ::openDiscoverAnchor,
+                                    onLiveRoom = { openDiscoverLive(it.roomId) },
+                                    onPlayRadio = ::playRadio,
+                                    playingRadioId = if (playbackState == "正在直播" && controller?.playWhenReady == true) {
+                                        controller?.sessionExtras?.getString("liveKey").orEmpty()
+                                            .takeIf { it.startsWith("live:radio:") }
+                                            ?.split(":")?.getOrNull(2)?.toLongOrNull()
+                                    } else null,
+                                    version = recommendVersion)
                                 2 -> LibraryScreen(effectiveLocal, cloudState, cloudVisible, ::openSettings, ::openAccount, { sheet = "queue" }, { refreshLibrary() }, { openAlbum(it) },
                                     { cloudSync.toggle(it.item(), it.owner) }, { selectTrack(it.item()) },
                                     { playCloudHistory(it) }, pendingTrackId, currentTrack?.id, controller?.playWhenReady == true, { switchTab(1) }, libraryFilter, { libraryFilter = it }, ::togglePlayback,

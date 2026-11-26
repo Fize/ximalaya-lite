@@ -19,8 +19,14 @@ class AccountContentApi(private val context: Context,
     private val paidDecoder: (String, String) -> Pair<String, String> = { file, ep -> PaidMediaDecoder.decode(context, file, ep) }) {
     private val client = http.newBuilder().followRedirects(false).followSslRedirects(false)
         .retryOnConnectionFailure(true).build()
-    private val device = context.getSharedPreferences("account-device", Context.MODE_PRIVATE).let {
-        it.getString("id", null) ?: UUID.randomUUID().toString().also { id -> check(it.edit().putString("id", id).commit()) }
+    private val device = deviceId(context)
+
+    companion object {
+        /** Stable per-install device id shared by account-bound requests. */
+        internal fun deviceId(context: Context): String =
+            context.getSharedPreferences("account-device", Context.MODE_PRIVATE).let {
+                it.getString("id", null) ?: UUID.randomUUID().toString().also { id -> check(it.edit().putString("id", id).commit()) }
+            }
     }
     private val userAgent = "ting_9.4.74.3(${URLEncoder.encode(Build.MODEL, "UTF-8")},Android${Build.VERSION.SDK_INT})"
     private fun cookie(lease: AccountLease?): String = buildString {
