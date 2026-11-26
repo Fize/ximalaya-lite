@@ -189,7 +189,13 @@ object DiscoveryParsers {
         }
         val used = groups.flatMap { it.categories }.map { it.id }.toSet()
         val rest = nodes.filter { it.id !in used }
-        return if (rest.isEmpty()) groups else groups + CategoryGroup("其他", rest)
+        return when {
+            rest.isEmpty() -> groups
+            groups.isEmpty() -> listOf(CategoryGroup("其他", rest))
+            // The navigation list can contain a category the web groups omit; keep it visible
+            // in the last group instead of showing a one-item "其他" section.
+            else -> groups.dropLast(1) + groups.last().copy(categories = groups.last().categories + rest)
+        }
     }
 
     private fun subCategories(data: JSONObject): List<SubCategory> =

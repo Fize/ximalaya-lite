@@ -107,7 +107,9 @@ class DiscoveryParsersTest {
         val nodes = groups.flatMap { it.categories }
         assertEquals(29, nodes.size)
         assertEquals(nodes.map { it.id }.distinct().size, nodes.size)
-        assertEquals(listOf("有声小说", "娱乐", "知识", "生活", "特色", "其他"), groups.map { it.title })
+        assertEquals(listOf("有声小说", "娱乐", "知识", "生活", "特色"), groups.map { it.title })
+        // 党员学习园地 is absent from the web groups and is appended to the last one.
+        assertTrue(groups.last().categories.any { it.id == 41 })
         val history = nodes.first { it.title == "历史" }
         assertEquals("lishi", history.code)
         assertTrue(nodes.all { it.code.isNotBlank() && it.title.isNotBlank() })

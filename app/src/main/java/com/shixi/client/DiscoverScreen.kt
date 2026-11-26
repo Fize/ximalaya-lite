@@ -4,7 +4,7 @@ import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.material3.MaterialTheme
-import androidx.compose.material3.PrimaryScrollableTabRow
+import androidx.compose.material3.PrimaryTabRow
 import androidx.compose.material3.Tab
 import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
@@ -39,9 +39,8 @@ fun DiscoverScreen(
     val tabStates = rememberSaveableStateHolder()
     Column(Modifier.fillMaxSize()) {
         PageHeading("发现", onSearch = onSearch)
-        PrimaryScrollableTabRow(
+        PrimaryTabRow(
             selectedTabIndex = tab,
-            edgePadding = 0.dp,
             divider = {},
             containerColor = MaterialTheme.colorScheme.surface,
         ) {
@@ -50,6 +49,8 @@ fun DiscoverScreen(
                     selected = tab == index,
                     onClick = { tab = index },
                     text = { Text(title, style = MaterialTheme.typography.labelLarge) },
+                    selectedContentColor = MaterialTheme.colorScheme.primary,
+                    unselectedContentColor = MaterialTheme.colorScheme.onSurfaceVariant,
                 )
             }
         }

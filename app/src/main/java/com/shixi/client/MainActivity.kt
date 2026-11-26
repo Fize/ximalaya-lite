@@ -604,7 +604,9 @@ class MainActivity : ComponentActivity() {
                                 playing = playbackState == "正在直播" && controller?.playWhenReady == true &&
                                     controller?.sessionExtras?.getString("liveKey").orEmpty().startsWith("live:room:$roomId:"),
                                 onToggle = { room ->
-                                    if (controller?.playWhenReady == true) controller?.pause()
+                                    val thisRoomPlaying = playbackState == "正在直播" && controller?.playWhenReady == true &&
+                                        controller?.sessionExtras?.getString("liveKey").orEmpty() == "live:room:${room.roomId}:${room.liveId}"
+                                    if (thisRoomPlaying) controller?.pause()
                                     else playLiveMedia("room", room.roomId, room.liveId, room.name, room.anchor, room.cover)
                                 })
                         }

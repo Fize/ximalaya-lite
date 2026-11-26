@@ -10,6 +10,7 @@ import androidx.compose.foundation.layout.PaddingValues
 import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.Spacer
 import androidx.compose.foundation.layout.fillMaxSize
+import androidx.compose.foundation.layout.fillMaxHeight
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.heightIn
@@ -19,6 +20,8 @@ import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.LazyRow
 import androidx.compose.foundation.lazy.items
 import androidx.compose.foundation.lazy.rememberLazyListState
+import androidx.compose.foundation.rememberScrollState
+import androidx.compose.foundation.verticalScroll
 import androidx.compose.material3.CircularProgressIndicator
 import androidx.compose.material3.ExperimentalMaterial3Api
 import androidx.compose.material3.FilterChip
@@ -298,12 +301,12 @@ fun DiscoverCategoryPage(
             mutableStateMapOf<Long, Long>().apply { metas.forEach { (key, value) -> put(key, value) } }
         }
         ModalBottomSheet(onDismissRequest = { showFilter = false }, sheetState = rememberModalBottomSheetState(skipPartiallyExpanded = true)) {
-            Column(Modifier.fillMaxWidth().padding(horizontal = 24.dp).padding(bottom = 24.dp)) {
+            Column(Modifier.fillMaxWidth().fillMaxHeight(0.85f).padding(horizontal = 24.dp).padding(bottom = 24.dp)) {
                 Text("筛选", Modifier.semantics { heading() }, style = MaterialTheme.typography.titleLarge)
-                dimensions.forEach { dimension ->
-                    FilterGroup(dimension, pick)
+                Column(Modifier.weight(1f).verticalScroll(rememberScrollState())) {
+                    dimensions.forEach { dimension -> FilterGroup(dimension, pick) }
+                    Spacer(Modifier.height(16.dp))
                 }
-                Spacer(Modifier.height(16.dp))
                 Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.spacedBy(12.dp)) {
                     TextButton(onClick = { pick.clear() }, modifier = Modifier.heightIn(min = 48.dp)) { Text("重置") }
                     Spacer(Modifier.weight(1f))
