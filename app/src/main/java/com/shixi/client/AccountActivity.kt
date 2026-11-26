@@ -10,6 +10,7 @@ import androidx.compose.foundation.text.KeyboardOptions
 import androidx.compose.foundation.verticalScroll
 import androidx.compose.material3.*
 import androidx.compose.runtime.*
+import androidx.compose.runtime.saveable.rememberSaveable
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.semantics.heading
 import androidx.compose.ui.semantics.semantics
@@ -35,11 +36,35 @@ class AccountActivity : ComponentActivity() {
                 val feedback = remember { SnackbarHostState() }
                 var requested by remember { mutableStateOf(false) }
                 var confirmLogout by remember { mutableStateOf(false) }
+                val versionName = remember { packageManager.getPackageInfo(packageName, 0).versionName.orEmpty() }
+                val legal = remember { LegalNoticeStore.get(this@AccountActivity) }
+                var consented by rememberSaveable { mutableStateOf(legal.accepted(versionName)) }
+                var viewingNotice by rememberSaveable { mutableStateOf(false) }
                 LaunchedEffect(state.busy, state.result) {
                     if (requested && !state.busy && state.result.isNotBlank()) { requested = false; feedback.showSnackbar(accountFeedback(state.result), withDismissAction = true) }
                 }
                 if (confirmLogout) AlertDialog(onDismissRequest = { confirmLogout = false }, title = { Text("退出登录？") }, text = { Text("本机收听记录会保留。") }, confirmButton = { TextButton(onClick = { confirmLogout = false; requested = true; mobile = ""; code = ""; account.logout() }) { Text("退出登录") } }, dismissButton = { TextButton(onClick = { confirmLogout = false }) { Text("取消") } })
                 Scaffold(snackbarHost = { SnackbarHost(feedback) }) { padding ->
+                    if (!state.signedIn && !consented) {
+                        Box(Modifier.padding(padding)) {
+                            LoginConsentScreen(
+                                required = true,
+                                onAccept = { legal.accept(versionName); consented = true },
+                                onExit = { finish() },
+                            )
+                        }
+                        return@Scaffold
+                    }
+                    if (viewingNotice) {
+                        Box(Modifier.padding(padding)) {
+                            LoginConsentScreen(
+                                required = false,
+                                onAccept = { viewingNotice = false },
+                                onExit = { viewingNotice = false },
+                            )
+                        }
+                        return@Scaffold
+                    }
                     Column(Modifier.fillMaxSize().padding(padding).imePadding().verticalScroll(rememberScrollState()).padding(20.dp), verticalArrangement = Arrangement.spacedBy(12.dp)) {
                         Row(verticalAlignment = androidx.compose.ui.Alignment.CenterVertically) {
                             SymbolButton(AppIcon.Back, "返回", onClick = { finish() })
@@ -63,6 +88,7 @@ class AccountActivity : ComponentActivity() {
                         if (state.signedIn) TextButton(enabled = !state.busy, onClick = { confirmLogout = true }) { Text("退出登录") }
                         HorizontalDivider()
                         Text("登录后自动同步订阅与收听记录。", color = MaterialTheme.colorScheme.onSurfaceVariant)
+                        TextButton(onClick = { viewingNotice = true }) { Text("查看登录声明") }
                     }
                 }
             }
