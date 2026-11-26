@@ -448,7 +448,7 @@ instrumentation 需真机，按现有 `-Pshixi.testRunner=...` 逐个跑。
 
 | 里程碑 | 状态 | 说明 |
 |---|---|---|
-| M0 数据层 | ✅ 完成 | `DiscoveryApi` + 解析器 + 17 个 fixture 契约测试（JVM，全部通过） |
+| M0 数据层 | ✅ 完成 | `DiscoveryApi` + 解析器 + 18 个 fixture 契约测试（JVM，全部通过） |
 | M1 推荐 + 专辑页 | ✅ 完成 | Web 推荐卡片 + 猜你喜欢；专辑页补主播/播放量/主播放按钮 |
 | M2 分类 | ✅ 完成 | 29 分类、子类、3 种排序、`metas` 筛选、分页（20/页） |
 | M3 榜单 | ✅ 完成 | 6 榜单 + 类目切换（含主播势力榜的锚点行） |
@@ -459,7 +459,7 @@ instrumentation 需真机，按现有 `-Pshixi.testRunner=...` 逐个跑。
 
 ### 14.2 验证结果
 
-- `:protocol:testDebugUnitTest`：17 个 fixture 契约测试通过。
+- `:protocol:testDebugUnitTest`：18 个 fixture 契约测试通过。
 - 线上 API 全链路冒烟（临时测试，未提交）：
   - 推荐 5 个分类卡片 + 52 条猜你喜欢；
   - 分类 29 个、历史 24 子类 / 5 筛选维度；`metas=131_2560-132_2722` 返回 20 条且全部「已完本 + 免费」；

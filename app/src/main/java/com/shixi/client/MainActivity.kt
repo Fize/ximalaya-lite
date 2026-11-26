@@ -601,7 +601,7 @@ class MainActivity : ComponentActivity() {
                             val roomId = liveByTab[tab]
                             if (roomId == null) EmptyBlock("直播间不存在", actionLabel = "返回") { navigateBack() }
                             else DiscoverLiveRoom(discovery, roomId, ::navigateBack,
-                                playing = controller?.playWhenReady == true &&
+                                playing = playbackState == "正在直播" && controller?.playWhenReady == true &&
                                     controller?.sessionExtras?.getString("liveKey").orEmpty().startsWith("live:room:$roomId:"),
                                 onToggle = { room ->
                                     if (controller?.playWhenReady == true) controller?.pause()
@@ -703,9 +703,11 @@ class MainActivity : ComponentActivity() {
                                     onAnchor = ::openDiscoverAnchor,
                                     onLiveRoom = { openDiscoverLive(it.roomId) },
                                     onPlayRadio = ::playRadio,
-                                    playingRadioId = controller?.sessionExtras?.getString("liveKey").orEmpty()
-                                        .takeIf { controller?.playWhenReady == true && it.startsWith("live:radio:") }
-                                        ?.split(":")?.getOrNull(2)?.toLongOrNull(),
+                                    playingRadioId = if (playbackState == "正在直播" && controller?.playWhenReady == true) {
+                                        controller?.sessionExtras?.getString("liveKey").orEmpty()
+                                            .takeIf { it.startsWith("live:radio:") }
+                                            ?.split(":")?.getOrNull(2)?.toLongOrNull()
+                                    } else null,
                                     version = recommendVersion)
                                 2 -> LibraryScreen(effectiveLocal, cloudState, cloudVisible, ::openSettings, ::openAccount, { sheet = "queue" }, { refreshLibrary() }, { openAlbum(it) },
                                     { cloudSync.toggle(it.item(), it.owner) }, { selectTrack(it.item()) },

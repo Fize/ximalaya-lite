@@ -240,7 +240,10 @@ class PlaybackService : MediaSessionService() {
             }.build()
         val http = OkHttpDataSource.Factory(mediaHttp)
         val source = ResolvingDataSource.Factory(DefaultDataSource.Factory(this, http)) { spec ->
-            try { spec.withUri(resolver.resolve(spec.uri)) }
+            // Only our own opaque URIs need resolution; HLS child playlists and segments
+            // arrive as absolute https URLs and must pass through untouched.
+            if (spec.uri.scheme != "shixi") spec
+            else try { spec.withUri(resolver.resolve(spec.uri)) }
             catch (failure: PlaybackAccessException) { throw failure }
             catch (failure: com.shixi.protocol.ContentAccessException) { throw failure }
             catch (_: Exception) { throw IOException("无法获取播放地址") }
